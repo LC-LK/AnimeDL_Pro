@@ -18,8 +18,15 @@ def get_config_path():
         str: Ruta absoluta completa al archivo de configuración.
     """
     if getattr(sys, 'frozen', False):
-        # En el .exe, guardamos en la misma carpeta que el ejecutable para portabilidad
-        return os.path.join(os.path.dirname(sys.executable), "config.json")
+        # En el .exe, primero intentamos en la carpeta del ejecutable
+        exe_dir = os.path.dirname(sys.executable)
+        # Si estamos en AppData (PyInstaller por defecto a veces usa carpetas temporales), 
+        # mejor usar una carpeta fija en el usuario para persistencia real
+        if "AppData" in exe_dir:
+            user_config_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "AnimeDownloader")
+            os.makedirs(user_config_dir, exist_ok=True)
+            return os.path.join(user_config_dir, "config.json")
+        return os.path.join(exe_dir, "config.json")
     return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config.json")
 
 CONFIG_FILE = get_config_path()
@@ -64,8 +71,14 @@ def load_config():
                         data["following"][base_url] = info
                         data["following"][base_url]["last_url"] = url
                 return data
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            print(f"Error decodificando config.json: {e}")
+            # Si el archivo está corrupto, quizás sea mejor no sobreescribirlo con defaults
+            # pero por ahora devolvemos defaults para que la app no explote
+            return default_config
+        except Exception as e:
+            print(f"Error cargando config.json: {e}")
+            return default_config
     return default_config
 
 def save_config(config):

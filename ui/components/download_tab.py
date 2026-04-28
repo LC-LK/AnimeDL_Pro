@@ -10,7 +10,7 @@ class DownloadTab(ft.Column):
     """
     Vista modular para la gestión de descargas activas.
     """
-    def __init__(self, on_start, on_stop, on_pause, on_restart, on_dir_picker, on_url_change):
+    def __init__(self, on_start, on_stop, on_pause, on_restart, on_dir_picker, on_url_change, on_follow):
         super().__init__()
         self.on_start = on_start
         self.on_stop = on_stop
@@ -18,6 +18,7 @@ class DownloadTab(ft.Column):
         self.on_restart = on_restart
         self.on_dir_picker = on_dir_picker
         self.on_url_change = on_url_change
+        self.on_follow = on_follow
         
         self.setup_controls()
         
@@ -28,8 +29,9 @@ class DownloadTab(ft.Column):
                     ft.Container(
                         content=ft.Column([
                             ft.ResponsiveRow([
-                                ft.Column([self.url_input], col={"sm": 12, "md": 8}),
-                                ft.Column([self.alias_input], col={"sm": 12, "md": 4}),
+                                ft.Column([self.url_input], col={"sm": 12, "md": 7}),
+                                ft.Column([self.alias_input], col={"sm": 12, "md": 3}),
+                                ft.Column([self.follow_btn], col={"sm": 12, "md": 2}),
                             ], spacing=10),
                             ft.ResponsiveRow([
                                 ft.Column([self.dir_input], col={"sm": 10, "md": 11}),
@@ -87,6 +89,16 @@ class DownloadTab(ft.Column):
             label="Alias",
             hint_text="Ej: One Piece",
             **TEXT_FIELD_STYLE
+        )
+        self.follow_btn = ft.IconButton(
+            icon=ft.Icons.BOOKMARK_ADD_ROUNDED,
+            icon_color=ACCENT_COLOR,
+            on_click=self.on_follow,
+            tooltip="Seguir anime (añadir a biblioteca)",
+            style=ft.ButtonStyle(
+                shape=ft.RoundedRectangleBorder(radius=8),
+                bgcolor={"": ft.Colors.with_opacity(0.1, ACCENT_COLOR)},
+            )
         )
         self.dir_input = ft.TextField(
             label="Carpeta de Destino",
