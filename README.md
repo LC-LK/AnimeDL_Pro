@@ -50,7 +50,7 @@ python src/main.py
 
 ## 🛠️ Desarrollo y Mantenimiento
 
-Para más detalles sobre la arquitectura del proyecto, diagramas de dependencias y guías de mantenimiento, consulta el archivo [MAINTENANCE.md](src/MAINTENANCE.md).
+Para más detalles sobre la arquitectura del proyecto, diagramas de dependencias y guías de mantenimiento, consulta el archivo [Mantenimiento.md](src/Mantenimiento.md).
 
 ### Ejecutar Tests
 ```bash
