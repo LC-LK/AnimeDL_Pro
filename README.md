@@ -60,8 +60,12 @@ Para añadir nuevas pestañas o modificar las existentes, edite los archivos en 
 ### Ejecución de Tests
 Para validar que los cambios no rompan la funcionalidad existente, ejecute:
 ```bash
-python -m unittest discover tests
+py -m unittest discover tests -v
 ```
+*(Nota: Use `py` en Windows o `python` según su configuración de sistema).*
 
-### Gestión de Configuración
-La configuración se almacena en `config.json`. Si se añaden nuevas opciones, asegúrese de actualizar los valores por defecto en `src/config/manager.py`.
+### Gestión de Configuración y UI
+- **Lógica**: La configuración persistente se almacena en `config.json`. Si se añaden nuevas opciones, asegúrese de actualizar los valores por defecto en `src/config/manager.py`.
+- **Visual**: Las constantes de diseño, dimensiones de ventana y la versión del programa se centralizan en `src/ui/styles.py`.
+- **Responsividad**: Al modificar componentes en `src/ui/components/`, asegúrese de probar la interfaz en dimensiones reducidas (ej. 400x200), utilizando el parámetro `wrap=True` en filas y ajustando los valores de `ft.ResponsiveRow`.
+
