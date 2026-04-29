@@ -12,17 +12,23 @@ MAIN_SCRIPT = os.path.join(BASE_DIR, "src", "main.py")
 params = [
     MAIN_SCRIPT,
     '--name=AnimeDL_Pro',
-    '--onefile',               # Un solo archivo .exe
+    '--onedir',               # Un solo archivo .exe (Aviso: --onedir suele dar menos falsos positivos)
     '--noconsole',             # Sin ventana de comandos (GUI pura)
     '--windowed',              # Modo ventana
     '--clean',                 # Limpiar temporales
+    f'--icon={os.path.join(BASE_DIR, "src", "img", "AnimeDL_Pro.ico")}',  # Icono de la aplicación
     
-    # Incluir todo el código fuente desde el directorio 'src'
+    # Información de versión (Metadatos) para reducir falsos positivos
+    f'--version-file={os.path.join(BASE_DIR, "version_info.txt")}',
+    
+    # Incluir todo el código fuente y recursos (como la nueva carpeta src/img)
     f'--add-data={os.path.join(BASE_DIR, "src")}{os.pathsep}src',
     
     # Recopilar dependencias críticas
     '--collect-all=playwright', # Necesario para el scraper
     '--collect-all=flet',       # Necesario para la UI
+    '--collect-all=flet_desktop', # Necesario para los binarios de la UI en escritorio
+    '--collect-all=certifi',    # Asegurar certificados SSL
     
     # Evitar problemas con bibliotecas dinámicas (opcional pero recomendado en Windows)
     '--hidden-import=flet.canvas',
@@ -33,12 +39,31 @@ params = [
 # params.append('--icon=assets/app.ico')
 
 def prepare_build():
-    """Limpia directorios de compilación previos."""
+    """Limpia directorios de compilación previos, archivos caché y temporales."""
+    print("[*] Iniciando limpieza de caché y archivos temporales...")
+    
+    # 1. Limpiar carpetas build y dist
     for folder in ['build', 'dist']:
         path = os.path.join(BASE_DIR, folder)
         if os.path.exists(path):
-            print(f"[*] Limpiando directorio {folder}...")
-            shutil.rmtree(path)
+            print(f"    - Eliminando directorio {folder}...")
+            shutil.rmtree(path, ignore_errors=True)
+    
+    # 2. Limpiar archivos .spec
+    for file in os.listdir(BASE_DIR):
+        if file.endswith(".spec"):
+            print(f"    - Eliminando archivo {file}...")
+            os.remove(os.path.join(BASE_DIR, file))
+            
+    # 3. Limpiar __pycache__ de forma recursiva
+    print("    - Eliminando directorios __pycache__...")
+    for root, dirs, files in os.walk(BASE_DIR):
+        for d in dirs:
+            if d == "__pycache__":
+                cache_path = os.path.join(root, d)
+                shutil.rmtree(cache_path, ignore_errors=True)
+    
+    print("[*] Limpieza completada.")
 
 if __name__ == "__main__":
     print(f"[*] Directorio base: {BASE_DIR}")

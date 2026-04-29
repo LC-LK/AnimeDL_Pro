@@ -39,6 +39,28 @@ class AnimeDownloaderApp:
     def setup_page_config(self):
         self.page.title = WINDOW_TITLE
         
+        # Configurar el icono de la ventana y barra de tareas
+        # Priorizamos .ico en Windows para la barra de tareas y .png para Flet
+        icon_found = False
+        for ext in ["ico", "png"]:
+            icon_path = resource_path(os.path.join("src", "img", f"AnimeDL_Pro.{ext}"))
+            if os.path.exists(icon_path):
+                self.page.window_icon = icon_path
+                if hasattr(self.page, "window"):
+                    self.page.window.icon = icon_path
+                icon_found = True
+                break
+        
+        # Fallback si no se encontró en src/img
+        if not icon_found:
+            for ext in ["ico", "png"]:
+                root_icon = resource_path(f"AnimeDL_Pro.{ext}")
+                if os.path.exists(root_icon):
+                    self.page.window_icon = root_icon
+                    if hasattr(self.page, "window"):
+                        self.page.window.icon = root_icon
+                    break
+        
         # Dimensiones iniciales y mínimas
         self.page.window_width = WINDOW_WIDTH
         self.page.window_height = WINDOW_HEIGHT
@@ -893,22 +915,29 @@ class AnimeDownloaderApp:
                                         save_config(self.config)
                                         self.update_library_list()
                                     else:
-                                        self.log(f"[!] Falló la descarga de: {filename}. Creando marcador .txt", type="error")
-                                        if os.path.exists(final_path): os.remove(final_path)
+                                        # Si el archivo existe pero la descarga falló o se detuvo
+                                        if os.path.exists(final_path):
+                                            os.remove(final_path)
                                         
-                                        # Crear archivo .txt como marcador de fallo
-                                        txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
-                                        txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
-                                        with open(txt_path, "w", encoding="utf-8") as f:
-                                            f.write(f"No se pudo descargar el capítulo {ep_number} de {alias or base_anime_name}.\n")
-                                            f.write(f"URL de origen: {current_url}\n")
-                                            f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                                        
-                                        # Aun así actualizamos la biblioteca para que no se quede trabado en este capítulo
-                                        if base_url in self.config["following"]:
-                                            self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
-                                            save_config(self.config)
-                                            self.update_library_list()
+                                        # Solo crear el archivo .txt si NO fue una detención manual
+                                        if not self.stop_requested:
+                                            self.log(f"[!] Falló la descarga de: {filename}. Creando marcador .txt", type="error")
+                                            
+                                            # Crear archivo .txt como marcador de fallo
+                                            txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
+                                            txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
+                                            with open(txt_path, "w", encoding="utf-8") as f:
+                                                f.write(f"No se pudo descargar el capítulo {ep_number} de {alias or base_anime_name}.\n")
+                                                f.write(f"URL de origen: {current_url}\n")
+                                                f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                            
+                                            # Actualizar biblioteca para saltar este capítulo si falló (pero no si se detuvo)
+                                            if base_url in self.config["following"]:
+                                                self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
+                                                save_config(self.config)
+                                                self.update_library_list()
+                                        else:
+                                            self.log(f"[*] Descarga de {filename} cancelada por el usuario.", type="warning")
                             else:
                                 self.log(f"[!] No se pudo obtener el enlace directo de MediaFire. Creando marcador .txt", type="error")
                                 alias = self.download_tab_view.alias_input.value.strip()

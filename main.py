@@ -41,5 +41,7 @@ if __name__ == "__main__":
         user_local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(user_local_appdata, "ms-playwright")
 
-    # Iniciar la aplicación Flet
-    ft.app(target=main)
+    # Iniciar la aplicación Flet con soporte para assets
+    # Definimos la carpeta raíz del proyecto como assets_dir para encontrar src/img
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ft.app(target=main, assets_dir=base_dir)

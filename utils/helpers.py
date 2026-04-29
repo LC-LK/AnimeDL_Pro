@@ -30,8 +30,16 @@ def resource_path(relative_path):
         # PyInstaller crea una carpeta temporal y guarda la ruta en _MEIPASS
         base_path = sys._MEIPASS
     except Exception:
-        base_path = os.path.abspath(".")
-    return os.path.join(base_path, relative_path)
+        # Si no es un ejecutable, buscar la carpeta raíz del proyecto (un nivel arriba de 'src')
+        base_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    
+    # Verificar si el archivo existe en la ruta calculada
+    full_path = os.path.join(base_path, relative_path)
+    if not os.path.exists(full_path):
+        # Fallback al directorio actual por si acaso
+        full_path = os.path.join(os.path.abspath("."), relative_path)
+        
+    return full_path
 
 def lazy_import_network():
     """
