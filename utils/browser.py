@@ -9,48 +9,50 @@ import subprocess
 def ensure_playwright_browsers():
     """
     Verifica e instala los binarios necesarios de Chromium para Playwright.
+    Evita bucles infinitos y cierres inesperados en entornos congelados (.exe).
     """
     try:
-        # Asegurar que la variable de entorno esté configurada antes de cualquier operación
+        # Configurar ruta de navegadores para entorno .exe (User/AppData/Local/ms-playwright)
         if getattr(sys, 'frozen', False):
             user_local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(user_local_appdata, "ms-playwright")
 
-        # IMPORTANTE: En el .exe NO debemos llamar a sys.executable de forma recursiva
-        # porque sys.executable es el propio .exe y causaría un bucle infinito.
         if getattr(sys, 'frozen', False):
             try:
-                # Intentamos la instalación usando la API interna de playwright directamente
+                # IMPORTANTE: playwright.main() llama a sys.exit() al terminar.
+                # Debemos capturar SystemExit para que el .exe no se cierre tras instalar.
                 from playwright.__main__ import main as playwright_main
                 import sys as _sys
                 
-                # Guardar args originales para restaurarlos después
                 old_args = _sys.argv
-                # Simulamos la llamada: playwright install chromium
                 _sys.argv = ["playwright", "install", "chromium"]
+                
+                print("[*] Iniciando instalación de Chromium...")
                 try:
-                    # Esto ejecuta la lógica de instalación dentro del mismo proceso
                     playwright_main()
+                except SystemExit:
+                    # Capturamos el exit de Playwright para continuar con nuestra App
+                    print("[+] Instalación completada (SystemExit capturado).")
                 finally:
                     _sys.argv = old_args
             except Exception as e:
-                print(f"Error en instalación interna: {e}")
-                # Si falla lo anterior, como último recurso intentamos llamar a un comando de sistema
-                # pero NUNCA al propio ejecutable (sys.executable)
+                print(f"[!] Error en instalación interna: {e}")
+                # Fallback a comando de sistema si falla lo anterior
                 subprocess.run(["cmd.exe", "/c", "playwright install chromium"], 
                              shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
         else:
-            # En modo script (desarrollo), el comportamiento estándar es seguro
+            # En modo desarrollo usamos el ejecutable de python
             subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
                          check=True, capture_output=True)
         return True
     except Exception as e:
-        print(f"Error al asegurar navegadores: {e}")
+        print(f"[!] Error crítico al asegurar navegadores: {e}")
         return False
 
-async def get_browser_instance(p):
+async def get_browser_instance(p, logger=None):
     """
     Crea y devuelve una instancia configurada de un navegador headless.
+    Permite una instalación automática y silenciosa si los binarios no existen.
     """
     try:
         # Configurar ruta de navegadores para entorno .exe
@@ -61,9 +63,13 @@ async def get_browser_instance(p):
         # Intentar lanzamiento normal
         return await p.chromium.launch(headless=True)
     except Exception as e:
-        # Si falla en el .exe, es probable que falten los binarios
-        if getattr(sys, 'frozen', False):
-            print(f"Navegador no encontrado. Intentando instalación silenciosa...")
+        # Si falla en el .exe o por falta de binarios, intentamos instalarlos
+        if "executable doesn't exist" in str(e).lower() or getattr(sys, 'frozen', False):
+            msg = "[!] Navegador no encontrado. Instalando componentes necesarios (esto puede tardar unos minutos)..."
+            print(msg)
+            if logger:
+                logger(msg, type="warning")
+                
             if ensure_playwright_browsers():
                 try:
                     return await p.chromium.launch(headless=True)

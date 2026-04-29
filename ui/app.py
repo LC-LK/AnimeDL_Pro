@@ -287,7 +287,7 @@ class AnimeDownloaderApp:
             from core.scraper import AnimeScraper
             
             async with async_playwright() as p:
-                browser = await get_browser_instance(p)
+                browser = await get_browser_instance(p, logger=self.log)
                 context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
                 scraper = AnimeScraper(context)
                 page = await context.new_page()
@@ -625,7 +625,7 @@ class AnimeDownloaderApp:
         from core.scraper import AnimeScraper
         
         async with async_playwright() as p:
-            browser = await get_browser_instance(p)
+            browser = await get_browser_instance(p, logger=self.log)
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             scraper = AnimeScraper(context)
             
@@ -689,7 +689,7 @@ class AnimeDownloaderApp:
         initial_count = len(self.pending_updates)
         async with async_playwright() as p:
             try:
-                browser = await get_browser_instance(p)
+                browser = await get_browser_instance(p, logger=self.log)
                 context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
                 scraper = AnimeScraper(context)
                 semaphore = asyncio.Semaphore(5)
@@ -802,7 +802,7 @@ class AnimeDownloaderApp:
         
         async with async_playwright() as p:
             try:
-                browser = await get_browser_instance(p)
+                browser = await get_browser_instance(p, logger=self.log)
                 context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
                 scraper = AnimeScraper(context)
                 await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
