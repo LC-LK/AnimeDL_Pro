@@ -13,6 +13,7 @@ src/
 ├── core/               # Lógica de negocio (Core Business Logic)
 │   ├── downloader.py   # Gestión de descargas fragmentadas y reintentos
 │   └── scraper.py      # Extracción de metadatos y enlaces de JkAnime
+├── img/                # Recursos visuales (Iconos .png, .ico)
 ├── ui/                 # Interfaz de Usuario (Flet)
 │   ├── components/     # Componentes UI reutilizables
 │   │   ├── activity_log.py
@@ -66,6 +67,14 @@ py -m unittest discover tests -v
 
 ### Gestión de Configuración y UI
 - **Lógica**: La configuración persistente se almacena en `config.json`. Si se añaden nuevas opciones, asegúrese de actualizar los valores por defecto en `src/config/manager.py`.
+- **Recursos**: Los iconos y logos deben colocarse en `src/img/`. La aplicación utiliza `assets_dir` en `main.py` para resolver estas rutas.
 - **Visual**: Las constantes de diseño, dimensiones de ventana y la versión del programa se centralizan en `src/ui/styles.py`.
-- **Responsividad**: Al modificar componentes en `src/ui/components/`, asegúrese de probar la interfaz en dimensiones reducidas (ej. 400x200), utilizando el parámetro `wrap=True` en filas y ajustando los valores de `ft.ResponsiveRow`.
+
+### Compilación y Build
+El archivo `build_exe.py` automatiza la creación del ejecutable.
+- **Limpieza**: Antes de compilar, el script elimina automáticamente `__pycache__`, carpetas `build/dist` y archivos `.spec` para asegurar una compilación limpia.
+- **Metadatos**: La información de versión se extrae de `version_info.txt`.
+
+### Responsividad
+Al modificar componentes en `src/ui/components/`, asegúrese de probar la interfaz en dimensiones reducidas (ej. 400x200), utilizando el parámetro `wrap=True` en filas y ajustando los valores de `ft.ResponsiveRow`.
 
