@@ -250,7 +250,8 @@ class AnimeDownloaderApp:
     async def _get_anime_metadata(self, url, scraper, page):
         """Helper centralizado para obtener miniatura y nombre limpio del anime."""
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            # Reducido timeout de 15s a 10s para una respuesta más ágil
+            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
             thumbnail = await scraper.get_anime_info(page)
             title = await page.title()
             
@@ -892,10 +893,40 @@ class AnimeDownloaderApp:
                                         save_config(self.config)
                                         self.update_library_list()
                                     else:
-                                        self.log(f"[!] Falló la descarga de: {filename}", type="error")
+                                        self.log(f"[!] Falló la descarga de: {filename}. Creando marcador .txt", type="error")
                                         if os.path.exists(final_path): os.remove(final_path)
+                                        
+                                        # Crear archivo .txt como marcador de fallo
+                                        txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
+                                        txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
+                                        with open(txt_path, "w", encoding="utf-8") as f:
+                                            f.write(f"No se pudo descargar el capítulo {ep_number} de {alias or base_anime_name}.\n")
+                                            f.write(f"URL de origen: {current_url}\n")
+                                            f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                        
+                                        # Aun así actualizamos la biblioteca para que no se quede trabado en este capítulo
+                                        if base_url in self.config["following"]:
+                                            self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
+                                            save_config(self.config)
+                                            self.update_library_list()
                             else:
-                                self.log(f"[!] No se pudo obtener el enlace directo de MediaFire.", type="error")
+                                self.log(f"[!] No se pudo obtener el enlace directo de MediaFire. Creando marcador .txt", type="error")
+                                alias = self.download_tab_view.alias_input.value.strip()
+                                base_dir = self.download_tab_view.dir_input.value or os.getcwd()
+                                anime_folder = alias or base_anime_name
+                                download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
+                                os.makedirs(download_dir, exist_ok=True)
+                                
+                                txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
+                                txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
+                                with open(txt_path, "w", encoding="utf-8") as f:
+                                    f.write(f"No se pudo obtener el enlace de MediaFire para el capítulo {ep_number} de {alias or base_anime_name}.\n")
+                                    f.write(f"URL de origen: {current_url}\n")
+                                
+                                if base_url in self.config["following"]:
+                                    self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
+                                    save_config(self.config)
+                                    self.update_library_list()
                         else:
                             self.log(f"[!] No se encontró el servidor MediaFire para este capítulo.", type="warning")
 

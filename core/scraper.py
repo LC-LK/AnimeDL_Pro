@@ -128,8 +128,11 @@ class AnimeScraper:
         """
         page = await self.context.new_page()
         try:
+            # Bloqueo agresivo de recursos para acelerar la carga
             await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-            await page.goto(server_url, timeout=30000, wait_until="domcontentloaded")
+            
+            # Reducido timeout de carga a 7 segundos    
+            await page.goto(server_url, timeout=3000, wait_until="domcontentloaded")
             content = await page.content()
             
             unavailable_markers = [
@@ -139,7 +142,8 @@ class AnimeScraper:
             if any(marker in content for marker in unavailable_markers):
                 return None, None
             
-            d_btn = await page.wait_for_selector("#downloadButton", timeout=15000)
+            # Reducido timeout de espera por el botón a 5 segundos
+            d_btn = await page.wait_for_selector("#downloadButton", timeout=3000)
             direct_link = await d_btn.get_attribute('href')
             original_name = await d_btn.get_attribute('aria-label') or "video"
             extension = os.path.splitext(original_name)[1] or ".mp4"
