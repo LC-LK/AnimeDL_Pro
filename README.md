@@ -2,7 +2,7 @@
 
 **AnimeDL Pro** es una aplicación de escritorio moderna y ligera diseñada para gestionar tu colección de anime y descargar capítulos de forma automatizada desde JkAnime. Construida con Python y Flet, ofrece una interfaz fluida, responsiva y profesional.
 
-![Versión](https://img.shields.io/badge/version-1.0-blue.svg)
+![Versión](https://img.shields.io/badge/version-1.1.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10%2B-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-important.svg)
 
