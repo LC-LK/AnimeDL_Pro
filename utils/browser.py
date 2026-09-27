@@ -56,7 +56,7 @@ async def get_browser_instance(p, logger=None):
     """
     try:
         # Configurar ruta de navegadores para entorno .exe
-        if getattr(sys, 'frozen', False):
+        if getattr (sys, 'frozen', False):
             user_local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(user_local_appdata, "ms-playwright")
             
