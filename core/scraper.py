@@ -6,22 +6,9 @@ import re
 import json
 import base64
 import os
-import asyncio
 
 # Expresiones regulares pre-compiladas
 RE_SERVERS = re.compile(r'var\s+servers\s*=\s*(\[.*?\]);')
-
-async def _scraper_retry(func, max_retries=3, base_delay=1.5):
-    """Helper interno: reintentos con backoff para navegaciones propensas a fallos."""
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await func()
-        except Exception as e:
-            last_exc = e
-            if attempt < max_retries:
-                await asyncio.sleep(base_delay * attempt)
-    raise last_exc
 
 class AnimeScraper:
     """
@@ -104,13 +91,7 @@ class AnimeScraper:
                     try:
                         # Bloqueo de recursos innecesarios
                         await temp_page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-                        try:
-                            await temp_page.goto(anime_main_url, wait_until="domcontentloaded", timeout=25000)
-                        except Exception:
-                            try:
-                                await temp_page.goto(anime_main_url, wait_until="commit", timeout=25000)
-                            except Exception:
-                                pass
+                        await temp_page.goto(anime_main_url, wait_until="domcontentloaded", timeout=10000)
                         
                         img_el = await temp_page.query_selector(".anime_info_img img")
                         if img_el:
@@ -135,69 +116,39 @@ class AnimeScraper:
     async def get_mediafire_direct_link(self, server_url):
         """
         Navega a la página de MediaFire para obtener el enlace directo al archivo de video.
-
-        Optimización: Timeout agresivo inicial para archivos inexistentes (rápido pase al siguiente servidor.
-        Solo reintenta si falla por timeout de red (no cuando el archivo está borrado).
+        
+        Maneja la detección de archivos eliminados o no disponibles y extrae la
+        extensión del archivo original.
+        
+        Args:
+            server_url (str): URL de la página intermedia de MediaFire.
+            
+        Returns:
+            tuple: (direct_link, extension) o (None, None) en caso de fallo o archivo borrado.
         """
         page = await self.context.new_page()
         try:
+            # Bloqueo agresivo de recursos para acelerar la carga
             await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-
-            async def _navigate_short_timeout():
-                try:
-                    await page.goto(server_url, wait_until="domcontentloaded", timeout=8000)
-                except Exception:
-                    await page.goto(server_url, wait_until="commit", timeout=8000)
-                content = await page.content()
-
-                unavailable_markers = [
-                    "The file you attempted to download has been removed",
-                    "The file you are looking for is currently unavailable"
-                ]
-                if any(marker in content for marker in unavailable_markers):
-                    return ("__UNAVAILABLE__", None)
-
-                d_btn = await page.wait_for_selector("#downloadButton", timeout=6000)
-                direct_link = await d_btn.get_attribute('href')
-                original_name = await d_btn.get_attribute('aria-label') or "video"
-                extension = os.path.splitext(original_name)[1] or ".mp4"
-                return (direct_link, extension)
-
-            try:
-                result = await _navigate_short_timeout()
-                if result[0] == "__UNAVAILABLE__":
-                    return None, None
-                return result
-            except Exception as first_error:
-                is_timeout = "timeout" in str(first_error).lower() or "exceeded" in str(first_error).lower()
-                if not is_timeout:
-                    return None, None
-
-                async def _navigate_long_timeout():
-                    try:
-                        await page.goto(server_url, wait_until="domcontentloaded", timeout=25000)
-                    except Exception:
-                        await page.goto(server_url, wait_until="commit", timeout=25000)
-                    content = await page.content()
-                    unavailable_markers = [
-                        "The file you attempted to download has been removed",
-                        "The file you are looking for is currently unavailable"
-                    ]
-                    if any(marker in content for marker in unavailable_markers):
-                        return ("__UNAVAILABLE__", None)
-                    d_btn = await page.wait_for_selector("#downloadButton", timeout=20000)
-                    direct_link = await d_btn.get_attribute('href')
-                    original_name = await d_btn.get_attribute('aria-label') or "video"
-                    extension = os.path.splitext(original_name)[1] or ".mp4"
-                    return (direct_link, extension)
-
-                try:
-                    result = await _navigate_long_timeout()
-                    if result[0] == "__UNAVAILABLE__":
-                        return None, None
-                    return result
-                except Exception:
-                    return None, None
+            
+            # Reducido timeout de carga a 7 segundos    
+            await page.goto(server_url, timeout=3000, wait_until="domcontentloaded")
+            content = await page.content()
+            
+            unavailable_markers = [
+                "The file you attempted to download has been removed",
+                "The file you are looking for is currently unavailable"
+            ]
+            if any(marker in content for marker in unavailable_markers):
+                return None, None
+            
+            # Reducido timeout de espera por el botón a 5 segundos
+            d_btn = await page.wait_for_selector("#downloadButton", timeout=3000)
+            direct_link = await d_btn.get_attribute('href')
+            original_name = await d_btn.get_attribute('aria-label') or "video"
+            extension = os.path.splitext(original_name)[1] or ".mp4"
+            
+            return direct_link, extension
         except Exception:
             return None, None
         finally:

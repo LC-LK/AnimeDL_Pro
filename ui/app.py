@@ -26,33 +26,6 @@ RE_EPISODE_NUM = re.compile(r'(\d+)$')
 RE_BASE_NAME = re.compile(r'\s*\d+$')
 RE_INVALID_CHARS = re.compile(r'[\\/*?:"<>|]')
 
-async def _with_retry_async(func, max_retries=3, base_delay=1.5, logger=None, log_prefix=""):
-    """
-    Ejecuta una función asíncrona con reintentos y backoff exponencial.
-    Útil para operaciones de red/navegación que pueden fallar intermitentemente.
-    """
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            return await func()
-        except Exception as e:
-            last_exc = e
-            if attempt < max_retries:
-                delay = base_delay * attempt
-                msg = f"[!] {log_prefix}Intento {attempt}/{max_retries} fallido: {str(e)[:80]}. Reintentando en {delay:.1f}s..."
-                if logger:
-                    logger(msg, type="warning")
-                else:
-                    print(msg)
-                await asyncio.sleep(delay)
-            else:
-                msg = f"[!] {log_prefix}Fallaron los {max_retries} intentos: {str(e)[:120]}"
-                if logger:
-                    logger(msg, type="warning")
-                else:
-                    print(msg)
-    raise last_exc
-
 class AnimeDownloaderApp:
     """
     Controlador principal de la aplicación.
@@ -297,66 +270,23 @@ class AnimeDownloaderApp:
             self.page.update()
 
     async def _get_anime_metadata(self, url, scraper, page):
-        """Helper centralizado para obtener miniatura y nombre limpio del anime.
-        Usado al seguir/descargar manualmente (incluye extracción de miniatura)."""
+        """Helper centralizado para obtener miniatura y nombre limpio del anime."""
         try:
-            async def _navigate_and_extract():
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                except Exception:
-                    await page.goto(url, wait_until="commit", timeout=45000)
-                thumbnail = await scraper.get_anime_info(page)
-                title = await page.title()
-                return thumbnail, title
-
-            thumbnail, title = await _with_retry_async(
-                _navigate_and_extract,
-                max_retries=3,
-                base_delay=2.0,
-                logger=self.log,
-                log_prefix=f"[{os.path.basename(url.rstrip('/'))}] "
-            )
-
+            # Reducido timeout de 15s a 10s para una respuesta más ágil
+            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            thumbnail = await scraper.get_anime_info(page)
+            title = await page.title()
+            
+            # Limpiar nombre del anime
             clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
             base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
             ep_match = RE_EPISODE_NUM.findall(clean_name)
             ep_number = ep_match[0] if ep_match else "0"
-
+            
             return thumbnail, base_anime_name, ep_number, clean_name
         except Exception as e:
             self.log(f"[!] Error extrayendo metadatos: {str(e)}", type="warning")
             return None, "Anime", "0", "Anime"
-
-    async def _get_anime_fast_for_update(self, url, scraper, page, alias_hint=""):
-        """Helper LIGERO para actualizaciones automáticas.
-        NO extrae miniatura -> 1 sola navegación por anime, 2x más rápido y consistente.
-        Solo extrae: nombre base, número capítulo, y el botón Siguiente se consulta aparte."""
-        try:
-            async def _navigate_only():
-                try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                except Exception:
-                    await page.goto(url, wait_until="commit", timeout=30000)
-                return await page.title()
-
-            title = await _with_retry_async(
-                _navigate_only,
-                max_retries=2,
-                base_delay=1.5,
-                logger=self.log,
-                log_prefix=f"[Update:{alias_hint or os.path.basename(url.rstrip('/'))}] "
-            )
-
-            clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
-            base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
-            ep_match = RE_EPISODE_NUM.findall(clean_name)
-            ep_number = ep_match[0] if ep_match else "0"
-
-            return base_anime_name, ep_number, clean_name
-        except Exception as e:
-            short = str(e)[:120]
-            self.log(f"[!] Actualización rápida falló para {alias_hint or url[:50]}: {short}", type="warning")
-            return "Anime", "0", "Anime"
 
     async def follow_anime(self, e):
         url = self.download_tab_view.url_input.value.strip()
@@ -721,7 +651,7 @@ class AnimeDownloaderApp:
             context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
             scraper = AnimeScraper(context)
             
-            semaphore = asyncio.Semaphore(4)
+            semaphore = asyncio.Semaphore(5)
             updates_found = []
             
             async def check_anime(base_url):
@@ -732,16 +662,14 @@ class AnimeDownloaderApp:
                     page = await context.new_page()
                     await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
                     try:
-                        alias_hint = data.get("alias", "")
-                        base_anime_name, ep_number, _ = await self._get_anime_fast_for_update(
-                            data.get("last_url"), scraper, page, alias_hint=alias_hint
-                        )
+                        thumbnail, base_anime_name, ep_number, clean_name = await self._get_anime_metadata(data.get("last_url"), scraper, page)
                         
                         next_url = await scraper.get_next_url(page)
+                        if thumbnail: self.config["following"][base_url]["thumbnail"] = thumbnail
                         self.config["following"][base_url]["has_next"] = next_url is not None
                         if next_url: updates_found.append((data.get("alias", base_anime_name), next_url))
                     except Exception as ex:
-                        self.log(f"Error revisando {base_url}: {str(ex)[:100]}", type="error")
+                        self.log(f"Error revisando {base_url}: {str(ex)}", type="error")
                     finally:
                         await page.close()
 
@@ -786,7 +714,7 @@ class AnimeDownloaderApp:
                 browser = await get_browser_instance(p, logger=self.log)
                 context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
                 scraper = AnimeScraper(context)
-                semaphore = asyncio.Semaphore(4)
+                semaphore = asyncio.Semaphore(5)
                 
                 async def check_anime(base_url, data):
                     if data.get("is_manual", False): return # Saltar animes manuales pendientes
@@ -797,11 +725,9 @@ class AnimeDownloaderApp:
                         page = await context.new_page()
                         await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
                         try:
-                            alias_hint = data.get("alias", "")
-                            base_anime_name, ep_number, _ = await self._get_anime_fast_for_update(
-                                last_url, scraper, page, alias_hint=alias_hint
-                            )
-
+                            thumbnail, base_anime_name, ep_number, clean_name = await self._get_anime_metadata(last_url, scraper, page)
+                            
+                            self.config["following"][base_url]["thumbnail"] = thumbnail or self.config["following"][base_url].get("thumbnail")
                             next_url = await scraper.get_next_url(page)
                             self.config["following"][base_url]["has_next"] = next_url is not None
                             if next_url:
@@ -809,9 +735,7 @@ class AnimeDownloaderApp:
                                 ep = ep[0] if ep else "?"
                                 self.pending_updates.append((base_url, next_url, data.get("alias", base_anime_name), ep))
                                 self.updates_list.controls.append(ft.Text(f"• {data.get('alias', base_anime_name)}: Cap {ep}", size=14, color="blue"))
-                        except Exception as ex:
-                            short = str(ex)[:100]
-                            self.log(f"[!] Revisión automática falló para {data.get('alias', base_url)}: {short}", type="warning")
+                        except: pass
                         finally: await page.close()
 
                 await asyncio.gather(*[check_anime(url, data) for url, data in self.config["following"].items()])
@@ -905,61 +829,25 @@ class AnimeDownloaderApp:
                 scraper = AnimeScraper(context)
                 await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
 
-                # Cache por sesión de descarga: miniatura y alias base del anime
-                # Evita doble navegación por cada capítulo (misma serie = misma portada)
-                session_anime_cache = {}  # {base_url: {"thumbnail": url, "alias_base": str}}
-
                 current_url = start_url
                 while current_url and not self.stop_requested:
                     self.log(f"[*] Navegando a: {current_url}", type="info")
                     page = await context.new_page()
                     try:
-                        base_url = re.sub(r'\d+/$', '', current_url)
-                        if not base_url.endswith("/"): base_url += "/"
-
-                        # Ruta optimizada: si ya conocemos la miniatura de este anime,
-                        # saltamos la extracción y hacemos 1 sola navegación en vez de 2
-                        cached = session_anime_cache.get(base_url)
-                        if cached:
-                            base_anime_name, ep_number, clean_name, thumbnail = (
-                                cached["alias_base"], "0", "", cached["thumbnail"]
-                            )
-
-                            async def _fast_nav():
-                                try:
-                                    await page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
-                                except Exception:
-                                    await page.goto(current_url, wait_until="commit", timeout=30000)
-                                t = await page.title()
-                                return t
-
-                            title = await _with_retry_async(
-                                _fast_nav,
-                                max_retries=2,
-                                base_delay=1.5,
-                                logger=self.log,
-                                log_prefix=f"[Download:{os.path.basename(current_url.rstrip('/'))}] "
-                            )
-                            clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
-                            ep_match = RE_EPISODE_NUM.findall(clean_name)
-                            ep_number = ep_match[0] if ep_match else "0"
-                        else:
-                            # Primera vez que vemos este anime: extraer todo + cachear miniatura
-                            thumbnail, base_anime_name, ep_number, clean_name = await self._get_anime_metadata(
-                                current_url, scraper, page
-                            )
-                            session_anime_cache[base_url] = {
-                                "thumbnail": thumbnail,
-                                "alias_base": base_anime_name
-                            }
+                        thumbnail, base_anime_name, ep_number, clean_name = await self._get_anime_metadata(current_url, scraper, page)
                         
                         self.current_chapter_info = f"Cap {ep_number}"
                         self.download_tab_view.status_text.value = f"Estado: Procesando {clean_name}"
                         self.page.update()
                         
+                        # Obtener base_url para el guardado posterior
+                        base_url = re.sub(r'\d+/$', '', current_url)
+                        if not base_url.endswith("/"): base_url += "/"
+                        
                         self.log(f"[*] Analizando página para {clean_name}...", type="info")
                         next_url = await scraper.get_next_url(page)
                         servers = await scraper.get_server_links(page)
+                        # thumb_url ya se obtuvo en _get_anime_metadata
                         thumb_url = thumbnail
                         
                         if "Mediafire" in servers:
@@ -978,12 +866,13 @@ class AnimeDownloaderApp:
                                 final_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", filename))
                                 
                                 self.log(f"[*] Iniciando descarga de: {filename}", type="info")
-                                _, aiohttp_mod = lazy_import_network()
-                                async with aiohttp_mod.ClientSession(headers={'User-Agent': random.choice(USER_AGENTS)}) as session:
+                                _, aiohttp = lazy_import_network()
+                                async with aiohttp.ClientSession(headers={'User-Agent': random.choice(USER_AGENTS)}) as session:
                                     res = await self.downloader.download_chunked(
                                         session, direct_link, final_path, self.update_progress
                                     )
                                     if res:
+                                        # Mostrar 100% y esperar 1 segundo antes de seguir
                                         self.download_tab_view.progress_bar.value = 1.0
                                         self.download_tab_view.progress_info.value = f"100% | Completado"
                                         self.page.update()
@@ -998,6 +887,7 @@ class AnimeDownloaderApp:
                                         
                                         self.log(f"[+] Descargado: {filename} ({file_size / (1024*1024):.1f} MB)", type="success")
                                         
+                                        # Actualizar entrada existente en biblioteca
                                         if base_url in self.config["following"]:
                                             self.config["following"][base_url].update({
                                                 "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
@@ -1010,6 +900,7 @@ class AnimeDownloaderApp:
                                                 "is_manual": False
                                             })
                                         else:
+                                            # Por si acaso no se guardó antes (no debería pasar)
                                             self.config["following"][base_url] = {
                                                 "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
                                                 "last_url": current_url,
@@ -1022,16 +913,17 @@ class AnimeDownloaderApp:
                                             }
                                             
                                         save_config(self.config)
-                                        # Actualizamos la biblioteca (ligero: solo si hay más animes que re-render valga la pena)
-                                        if len(self.config.get("following", {})) <= 120:
-                                            self.update_library_list()
+                                        self.update_library_list()
                                     else:
+                                        # Si el archivo existe pero la descarga falló o se detuvo
                                         if os.path.exists(final_path):
                                             os.remove(final_path)
                                         
+                                        # Solo crear el archivo .txt si NO fue una detención manual
                                         if not self.stop_requested:
                                             self.log(f"[!] Falló la descarga de: {filename}. Creando marcador .txt", type="error")
                                             
+                                            # Crear archivo .txt como marcador de fallo
                                             txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
                                             txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
                                             with open(txt_path, "w", encoding="utf-8") as f:
@@ -1039,11 +931,11 @@ class AnimeDownloaderApp:
                                                 f.write(f"URL de origen: {current_url}\n")
                                                 f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                                             
+                                            # Actualizar biblioteca para saltar este capítulo si falló (pero no si se detuvo)
                                             if base_url in self.config["following"]:
                                                 self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
                                                 save_config(self.config)
-                                                if len(self.config.get("following", {})) <= 120:
-                                                    self.update_library_list()
+                                                self.update_library_list()
                                         else:
                                             self.log(f"[*] Descarga de {filename} cancelada por el usuario.", type="warning")
                             else:
@@ -1063,8 +955,7 @@ class AnimeDownloaderApp:
                                 if base_url in self.config["following"]:
                                     self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
                                     save_config(self.config)
-                                    if len(self.config.get("following", {})) <= 120:
-                                        self.update_library_list()
+                                    self.update_library_list()
                         else:
                             self.log(f"[!] No se encontró el servidor MediaFire para este capítulo.", type="warning")
 
@@ -1077,6 +968,7 @@ class AnimeDownloaderApp:
                     finally:
                         await page.close()
             finally:
+                # Mostrar resumen final
                 if self.chapters_downloaded_count > 0:
                     end_time = time.time()
                     total_time = end_time - self.session_start_time
@@ -1090,9 +982,6 @@ class AnimeDownloaderApp:
                     self.log(f"• Tiempo total: {total_time:.1f} segundos", type="info")
                     self.log(f"• Velocidad media: {avg_speed:.2f} MB/s", type="info")
                     self.log("="*40, type="info")
-                    # Actualización final de biblioteca al terminar toda la sesión (asegura consistencia)
-                    save_config(self.config)
-                    self.update_library_list()
 
                 self.download_tab_view.start_btn.disabled = False
                 self.download_tab_view.stop_btn.disabled = True
@@ -1100,24 +989,13 @@ class AnimeDownloaderApp:
                 self.download_tab_view.restart_btn.disabled = True
                 self.download_tab_view.status_text.value = "Estado: Finalizado"
                 
+                # Resetear barra de progreso al finalizar
                 self.download_tab_view.progress_bar.value = 0
                 self.download_tab_view.progress_info.value = "0% | 0MB / 0MB | 0.00 MB/s"
                 
                 self.page.update()
 
     async def update_progress(self, progress, downloaded, total, speed):
-        # Limitar actualizaciones de UI a cada 0.2s mínimo.
-        # update_progress se llama ~3-5 veces por segundo; el DOM no necesita tanto refresco.
-        now_ts = time.time()
-        last = getattr(self, "_last_progress_update_ts", 0)
-        if now_ts - last < 0.18:
-            # Actualizar sin render (solo atributos para la siguiente vez que se dibuje)
-            self.download_tab_view.progress_bar.value = progress
-            self.download_tab_view.progress_info.value = f"{progress:.1%} | {downloaded/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB | {speed:.2f} MB/s"
-            self.download_tab_view.status_text.value = f"Estado: Descargando {self.current_chapter_info} ({progress:.1%})"
-            return
-
-        self._last_progress_update_ts = now_ts
         self.download_tab_view.progress_bar.value = progress
         self.download_tab_view.progress_info.value = f"{progress:.1%} | {downloaded/(1024*1024):.1f}MB / {total/(1024*1024):.1f}MB | {speed:.2f} MB/s"
         self.download_tab_view.status_text.value = f"Estado: Descargando {self.current_chapter_info} ({progress:.1%})"
