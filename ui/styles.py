@@ -34,7 +34,7 @@ TEXT_FIELD_STYLE = {
 WINDOW_WIDTH = 800
 WINDOW_HEIGHT = 800
 WINDOW_TITLE = "AnimeDL Pro"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # Colores Categorizados para Logs (WCAG 2.1 Contrast > 4.5:1)
 LOG_COLORS = {

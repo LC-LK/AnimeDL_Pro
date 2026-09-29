@@ -105,6 +105,11 @@ class AnimeDownloaderApp:
         # Inicializar herramientas (Downloader se carga de forma diferida al usarse)
         self._downloader = None
         
+        # Browser context singleton (reutilización para evitar launch/close repetido)
+        self._browser = None
+        self._playwright = None
+        self._context = None
+        
         # Diálogos y Pickers
         self.dir_picker = ft.FilePicker(on_result=self.on_dir_result)
         self.page.overlay.append(self.dir_picker)
@@ -118,6 +123,33 @@ class AnimeDownloaderApp:
             from core.downloader import Downloader
             self._downloader = Downloader(self)
         return self._downloader
+
+    async def get_browser_context(self):
+        """Obtiene o crea un contexto de navegador reutilizable (singleton)."""
+        if self._context is None:
+            async_playwright, _ = lazy_import_network()
+            self._playwright = await async_playwright().start()
+            self._browser = await get_browser_instance(self._playwright, logger=self.log)
+            self._context = await self._browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                viewport={'width': 1280, 'height': 720}
+            )
+            # Bloquear recursos innecesarios globalmente para acelerar navegación
+            await self._context.route("**/*",
+                lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+        return self._context
+
+    async def close_browser(self):
+        """Cierra el navegador y libera recursos."""
+        if self._context:
+            await self._context.close()
+            self._context = None
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
 
     def setup_dialogs(self):
         """Prepara los diálogos modales de confirmación y actualización."""
@@ -308,68 +340,65 @@ class AnimeDownloaderApp:
         
         try:
             self.log(f"[*] Obteniendo información de: {url}...", type="info")
-            async_playwright, _ = lazy_import_network()
             from core.scraper import AnimeScraper
             
-            async with async_playwright() as p:
-                browser = await get_browser_instance(p, logger=self.log)
-                context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-                scraper = AnimeScraper(context)
-                page = await context.new_page()
-                # Permitir imágenes para poder extraer thumbnail
-                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["font", "media", "stylesheet"] else route.continue_())
-                
-                # 1. Navegar a página del capítulo para obtener metadata (título, episodio)
-                await page.goto(url, wait_until="domcontentloaded", timeout=10000)
-                
-                title = await page.title()
-                clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
-                base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
-                ep_match = RE_EPISODE_NUM.findall(clean_name)
-                ep_number = ep_match[0] if ep_match else "0"
-                
-                # 2. Navegar a página principal del anime para obtener la PORTADA correcta
-                # (solo la primera vez que se sigue, no en actualizaciones)
-                thumbnail = await scraper.get_anime_info(page)
-                
-                await page.close()
-                await browser.close()
-                
-                final_alias = alias or base_anime_name
-                
-                # Actualizar alias visualmente si se obtuvo automáticamente
-                if not alias and base_anime_name and base_anime_name != "Anime":
-                    self.download_tab_view.alias_input.value = base_anime_name
-                elif not alias:
-                    self.download_tab_view.alias_input.value = ""
-                
-                if base_url not in self.config["following"]:
-                    self.log(f"[+] Siguiendo nuevo anime: {final_alias}", type="success")
-                    self.config["following"][base_url] = {
-                        "alias": final_alias,
-                        "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
-                        "last_url": url,
-                        "thumbnail": thumbnail,
-                        "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "has_next": True,
-                        "download_path": self.download_tab_view.dir_input.value,
-                        "is_manual": True
-                    }
-                else:
-                    self.log(f"[*] Actualizando datos de: {final_alias}", type="info")
-                    self.config["following"][base_url]["alias"] = final_alias
-                    self.config["following"][base_url]["download_path"] = self.download_tab_view.dir_input.value
-                    self.config["following"][base_url]["is_manual"] = True
-                    if thumbnail and thumbnail != "https://jkanime.net/assets/images/no-poster.jpg":
-                        self.config["following"][base_url]["thumbnail"] = thumbnail
-                    
-                if save_config(self.config):
-                    self.update_library_list()
-                    self.download_tab_view.alias_input.value = final_alias
-                    self.page.snack_bar = ft.SnackBar(ft.Text(f"Biblioteca actualizada: {final_alias}"))
-                    self.page.snack_bar.open = True
-                else:
-                    self.log("[!] Error al guardar en la biblioteca.", type="error")
+            context = await self.get_browser_context()
+            scraper = AnimeScraper(context)
+            page = await context.new_page()
+            # Permitir imágenes para poder extraer thumbnail
+            await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["font", "media", "stylesheet"] else route.continue_())
+            
+            # 1. Navegar a página del capítulo para obtener metadata (título, episodio)
+            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            
+            title = await page.title()
+            clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
+            base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
+            ep_match = RE_EPISODE_NUM.findall(clean_name)
+            ep_number = ep_match[0] if ep_match else "0"
+            
+            # 2. Navegar a página principal del anime para obtener la PORTADA correcta
+            # (solo la primera vez que se sigue, no en actualizaciones)
+            thumbnail = await scraper.get_anime_info(page)
+            
+            await page.close()
+            
+            final_alias = alias or base_anime_name
+            
+            # Actualizar alias visualmente si se obtuvo automáticamente
+            if not alias and base_anime_name and base_anime_name != "Anime":
+                self.download_tab_view.alias_input.value = base_anime_name
+            elif not alias:
+                self.download_tab_view.alias_input.value = ""
+            
+            if base_url not in self.config["following"]:
+                self.log(f"[+] Siguiendo nuevo anime: {final_alias}", type="success")
+                self.config["following"][base_url] = {
+                    "alias": final_alias,
+                    "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
+                    "last_url": url,
+                    "thumbnail": thumbnail,
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "has_next": True,
+                    "download_path": self.download_tab_view.dir_input.value,
+                    "is_manual": True
+                }
+            else:
+                self.log(f"[*] Actualizando datos de: {final_alias}", type="info")
+                self.config["following"][base_url]["alias"] = final_alias
+                self.config["following"][base_url]["download_path"] = self.download_tab_view.dir_input.value
+                self.config["following"][base_url]["is_manual"] = True
+                if thumbnail and thumbnail != "https://jkanime.net/assets/images/no-poster.jpg":
+                    self.config["following"][base_url]["thumbnail"] = thumbnail
+
+            if save_config(self.config):
+                self.update_library_list()
+                self.download_tab_view.alias_input.value = final_alias
+                self.page.snack_bar = ft.SnackBar(ft.Text(f"Biblioteca actualizada: {final_alias}"))
+                self.page.snack_bar.open = True
+            else:
+                self.log("[!] Error al guardar en la biblioteca.", type="error")
+
         except Exception as e:
             self.log(f"[!] Error de conexión: {str(e)}", type="error")
             
@@ -664,47 +693,43 @@ class AnimeDownloaderApp:
         self.library_tab_view.check_updates_btn.text = "Buscando..."
         self.page.update()
 
-        async_playwright, _ = lazy_import_network()
         from core.scraper import AnimeScraper
         
-        async with async_playwright() as p:
-            browser = await get_browser_instance(p, logger=self.log)
-            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-            scraper = AnimeScraper(context)
-            
-            # Aumentar concurrencia a 15 para checks ligeros
-            semaphore = asyncio.Semaphore(15)
-            updates_found = []
-            
-            async def check_anime(base_url):
-                async with semaphore:
-                    data = self.config["following"].get(base_url)
-                    if not data or data.get("is_manual", False): 
-                        return
+        context = await self.get_browser_context()
+        scraper = AnimeScraper(context)
+        
+        # Aumentar concurrencia a 15 para checks ligeros
+        semaphore = asyncio.Semaphore(15)
+        updates_found = []
+        
+        async def check_anime(base_url):
+            async with semaphore:
+                data = self.config["following"].get(base_url)
+                if not data or data.get("is_manual", False): 
+                    return
+                
+                page = await context.new_page()
+                # Bloqueo agresivo: solo HTML y scripts necesarios
+                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+                try:
+                    last_url = data.get("last_url")
+                    if not last_url: return
                     
-                    page = await context.new_page()
-                    # Bloqueo agresivo: solo HTML y scripts necesarios
-                    await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-                    try:
-                        last_url = data.get("last_url")
-                        if not last_url: return
-                        
-                        # Timeout reducido a 7s para checks rápidos
-                        await page.goto(last_url, wait_until="domcontentloaded", timeout=7000)
-                        
-                        # SOLO obtener next_url (sin metadata pesada ni thumbnail)
-                        next_url = await scraper.get_next_url(page)
-                        
-                        self.config["following"][base_url]["has_next"] = next_url is not None
-                        if next_url: 
-                            updates_found.append((data.get("alias", base_url), next_url))
-                    except Exception as ex:
-                        self.log(f"Error revisando {base_url}: {str(ex)}", type="error")
-                    finally:
-                        await page.close()
+                    # Timeout reducido a 7s para checks rápidos
+                    await page.goto(last_url, wait_until="domcontentloaded", timeout=7000)
+                    
+                    # SOLO obtener next_url (sin metadata pesada ni thumbnail)
+                    next_url = await scraper.get_next_url(page)
+                    
+                    self.config["following"][base_url]["has_next"] = next_url is not None
+                    if next_url: 
+                        updates_found.append((data.get("alias", base_url), next_url))
+                except Exception as ex:
+                    self.log(f"Error revisando {base_url}: {str(ex)}", type="error")
+                finally:
+                    await page.close()
 
-            await asyncio.gather(*[check_anime(url) for url in list(self.selected_animes)])
-            await browser.close()
+        await asyncio.gather(*[check_anime(url) for url in list(self.selected_animes)])
 
         save_config(self.config)
         self.library_tab_view.check_updates_btn.disabled = False
@@ -735,60 +760,53 @@ class AnimeDownloaderApp:
         if not self.config["following"]: return
         
         self.log(f"[*] Verificando actualizaciones automáticas...", type="info")
-        async_playwright, _ = lazy_import_network()
         from core.scraper import AnimeScraper
         
         # Limpiar estado previo
         self.pending_updates.clear()
         self.updates_list.controls.clear()
         
-        async with async_playwright() as p:
-            try:
-                browser = await get_browser_instance(p, logger=self.log)
-                context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-                scraper = AnimeScraper(context)
-                semaphore = asyncio.Semaphore(15)
-                
-                # Recolectar resultados en lista local para evitar race conditions en UI
-                found_updates = []
-                
-                async def check_anime(base_url, data):
-                    if data.get("is_manual", False): return
-                    
-                    async with semaphore:
-                        last_url = data.get("last_url")
-                        if not last_url: return
-                        page = await context.new_page()
-                        await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-                        try:
-                            await page.goto(last_url, wait_until="domcontentloaded", timeout=7000)
-                            next_url = await scraper.get_next_url(page)
-                            self.config["following"][base_url]["has_next"] = next_url is not None
-                            if next_url:
-                                ep = re.findall(r'/(\d+)/$', next_url)
-                                ep = ep[0] if ep else "?"
-                                alias = data.get("alias", base_url)
-                                found_updates.append((base_url, next_url, alias, ep))
-                        except: pass
-                        finally: await page.close()
+        context = await self.get_browser_context()
+        scraper = AnimeScraper(context)
+        semaphore = asyncio.Semaphore(15)
+        
+        # Recolectar resultados en lista local para evitar race conditions en UI
+        found_updates = []
+        
+        async def check_anime(base_url, data):
+            if data.get("is_manual", False): return
+            
+            async with semaphore:
+                last_url = data.get("last_url")
+                if not last_url: return
+                page = await context.new_page()
+                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+                try:
+                    await page.goto(last_url, wait_until="domcontentloaded", timeout=7000)
+                    next_url = await scraper.get_next_url(page)
+                    self.config["following"][base_url]["has_next"] = next_url is not None
+                    if next_url:
+                        ep = re.findall(r'/(\d+)/$', next_url)
+                        ep = ep[0] if ep else "?"
+                        alias = data.get("alias", base_url)
+                        found_updates.append((base_url, next_url, alias, ep))
+                except: pass
+                finally: await page.close()
 
-                await asyncio.gather(*[check_anime(url, data) for url, data in self.config["following"].items()])
-                await browser.close()
-                save_config(self.config)
-                
-                # Actualizar UI una sola vez con todos los resultados
-                if found_updates:
-                    for base_url, next_url, alias, ep in found_updates:
-                        self.pending_updates.append((base_url, next_url, alias, ep))
-                        self.updates_list.controls.append(ft.Text(f"• {alias}: Cap {ep}", size=14, color="blue"))
-                    
-                    self.log(f"[+] Se encontraron {len(found_updates)} nuevos capítulos.", type="success")
-                    self.update_dialog.open = True
-                    self.page.update()
-                else:
-                    self.log(f"[-] No se encontraron capítulos nuevos.", type="info")
-            except Exception as e:
-                self.log(f"Error en actualización automática: {str(e)}", type="error")
+        await asyncio.gather(*[check_anime(url, data) for url, data in self.config["following"].items()])
+        save_config(self.config)
+        
+        # Actualizar UI una sola vez con todos los resultados
+        if found_updates:
+            for base_url, next_url, alias, ep in found_updates:
+                self.pending_updates.append((base_url, next_url, alias, ep))
+                self.updates_list.controls.append(ft.Text(f"• {alias}: Cap {ep}", size=14, color="blue"))
+            
+            self.log(f"[+] Se encontraron {len(found_updates)} nuevos capítulos.", type="success")
+            self.update_dialog.open = True
+            self.page.update()
+        else:
+            self.log(f"[-] No se encontraron capítulos nuevos.", type="info")
 
     async def close_update_dialog(self, e):
         self.update_dialog.open = False
@@ -846,24 +864,20 @@ class AnimeDownloaderApp:
             self.download_tab_view.alias_input.value = "Obteniendo nombre..."
             self.page.update()
             try:
-                async_playwright, _ = lazy_import_network()
                 from core.scraper import AnimeScraper
-                async with async_playwright() as p:
-                    browser = await get_browser_instance(p, logger=self.log)
-                    context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-                    scraper = AnimeScraper(context)
-                    page = await context.new_page()
-                    await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-                    await page.goto(url, wait_until="domcontentloaded", timeout=8000)
-                    title = await page.title()
-                    clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
-                    base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
-                    await page.close()
-                    await browser.close()
-                    if base_anime_name and base_anime_name != "Anime":
-                        self.download_tab_view.alias_input.value = base_anime_name
-                    else:
-                        self.download_tab_view.alias_input.value = ""
+                context = await self.get_browser_context()
+                scraper = AnimeScraper(context)
+                page = await context.new_page()
+                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+                await page.goto(url, wait_until="domcontentloaded", timeout=8000)
+                title = await page.title()
+                clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
+                base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
+                await page.close()
+                if base_anime_name and base_anime_name != "Anime":
+                    self.download_tab_view.alias_input.value = base_anime_name
+                else:
+                    self.download_tab_view.alias_input.value = ""
             except Exception:
                 self.download_tab_view.alias_input.value = ""
             self.page.update()
@@ -884,198 +898,194 @@ class AnimeDownloaderApp:
         self.current_task = asyncio.create_task(self.main_loop(url))
 
     async def main_loop(self, start_url):
-        async_playwright, _ = lazy_import_network()
         from core.scraper import AnimeScraper
         
-        async with async_playwright() as p:
+        context = await self.get_browser_context()
+        scraper = AnimeScraper(context)
+        # El context ya tiene route bloqueado globalmente
+
+        current_url = start_url
+        while current_url and not self.stop_requested:
+            self.log(f"[*] Navegando a: {current_url}", type="info")
+            page = await context.new_page()
             try:
-                browser = await get_browser_instance(p, logger=self.log)
-                context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-                scraper = AnimeScraper(context)
-                await context.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+                thumbnail, base_anime_name, ep_number, clean_name = await self._get_anime_metadata(current_url, scraper, page)
+                
+                self.current_chapter_info = f"Cap {ep_number}"
+                self.download_tab_view.status_text.value = f"Estado: Procesando {clean_name}"
+                self.page.update()
+                
+                # Obtener base_url para el guardado posterior
+                base_url = re.sub(r'\d+/$', '', current_url)
+                if not base_url.endswith("/"): base_url += "/"
+                
+                self.log(f"[*] Analizando página para {clean_name}...", type="info")
+                next_url = await scraper.get_next_url(page)
+                servers = await scraper.get_server_links(page)
+                # thumb_url ya se obtuvo en _get_anime_metadata
+                thumb_url = thumbnail
+                
+                if "Mediafire" in servers:
+                    mf_url = servers["Mediafire"]
+                    self.log(f"[*] Servidor MediaFire encontrado, obteniendo enlace directo...", type="info")
+                    direct_link, ext = await scraper.get_mediafire_direct_link(mf_url)
+                    
+                    if direct_link:
+                        alias = self.download_tab_view.alias_input.value.strip()
+                        base_dir = self.download_tab_view.dir_input.value or os.getcwd()
+                        anime_folder = alias or base_anime_name
+                        download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
+                        os.makedirs(download_dir, exist_ok=True)
 
-                current_url = start_url
-                while current_url and not self.stop_requested:
-                    self.log(f"[*] Navegando a: {current_url}", type="info")
-                    page = await context.new_page()
-                    try:
-                        thumbnail, base_anime_name, ep_number, clean_name = await self._get_anime_metadata(current_url, scraper, page)
+                        filename = f"{alias or base_anime_name} - {ep_number}{ext}"
+                        final_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", filename))
                         
-                        self.current_chapter_info = f"Cap {ep_number}"
-                        self.download_tab_view.status_text.value = f"Estado: Procesando {clean_name}"
-                        self.page.update()
-                        
-                        # Obtener base_url para el guardado posterior
-                        base_url = re.sub(r'\d+/$', '', current_url)
-                        if not base_url.endswith("/"): base_url += "/"
-                        
-                        self.log(f"[*] Analizando página para {clean_name}...", type="info")
-                        next_url = await scraper.get_next_url(page)
-                        servers = await scraper.get_server_links(page)
-                        # thumb_url ya se obtuvo en _get_anime_metadata
-                        thumb_url = thumbnail
-                        
-                        if "Mediafire" in servers:
-                            mf_url = servers["Mediafire"]
-                            self.log(f"[*] Servidor MediaFire encontrado, obteniendo enlace directo...", type="info")
-                            direct_link, ext = await scraper.get_mediafire_direct_link(mf_url)
+                        self.log(f"[*] Iniciando descarga de: {filename}", type="info")
+                        # Usar sesión compartida del downloader (connection pooling)
+                        session = self.downloader.session
+                        res = await self.downloader.download_chunked(
+                            session, direct_link, final_path, self.update_progress
+                        )
+                        if res:
+                            # Mostrar 100% y esperar 1 segundo antes de seguir
+                            self.download_tab_view.progress_bar.value = 1.0
+                            self.download_tab_view.progress_info.value = f"100% | Completado"
+                            self.page.update()
+                            await asyncio.sleep(1)
+                            self.download_tab_view.progress_bar.value = 0
+                            self.download_tab_view.progress_info.value = "0% | Esperando siguiente..."
+                            self.page.update()
+
+                            file_size = os.path.getsize(final_path)
+                            self.total_downloaded_session += file_size
+                            self.chapters_downloaded_count += 1
                             
-                            if direct_link:
-                                alias = self.download_tab_view.alias_input.value.strip()
-                                base_dir = self.download_tab_view.dir_input.value or os.getcwd()
-                                anime_folder = alias or base_anime_name
-                                download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
-                                os.makedirs(download_dir, exist_ok=True)
-
-                                filename = f"{alias or base_anime_name} - {ep_number}{ext}"
-                                final_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", filename))
-                                
-                                self.log(f"[*] Iniciando descarga de: {filename}", type="info")
-                                _, aiohttp = lazy_import_network()
-                                async with aiohttp.ClientSession(headers={'User-Agent': random.choice(USER_AGENTS)}) as session:
-                                    res = await self.downloader.download_chunked(
-                                        session, direct_link, final_path, self.update_progress
-                                    )
-                                    if res:
-                                        # Mostrar 100% y esperar 1 segundo antes de seguir
-                                        self.download_tab_view.progress_bar.value = 1.0
-                                        self.download_tab_view.progress_info.value = f"100% | Completado"
-                                        self.page.update()
-                                        await asyncio.sleep(1)
-                                        self.download_tab_view.progress_bar.value = 0
-                                        self.download_tab_view.progress_info.value = "0% | Esperando siguiente..."
-                                        self.page.update()
-
-                                        file_size = os.path.getsize(final_path)
-                                        self.total_downloaded_session += file_size
-                                        self.chapters_downloaded_count += 1
-                                        
-                                        self.log(f"[+] Descargado: {filename} ({file_size / (1024*1024):.1f} MB)", type="success")
-                                        
-                                        # Actualizar entrada existente en biblioteca
-                                        if base_url in self.config["following"]:
-                                            self.config["following"][base_url].update({
-                                                "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
-                                                "last_url": current_url,
-                                                "alias": alias or base_anime_name,
-                                                "thumbnail": thumb_url or self.config["following"][base_url].get("thumbnail"),
-                                                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                "has_next": next_url is not None,
-                                                "download_path": base_dir,
-                                                "is_manual": False
-                                            })
-                                        else:
-                                            # Por si acaso no se guardó antes (no debería pasar)
-                                            self.config["following"][base_url] = {
-                                                "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
-                                                "last_url": current_url,
-                                                "alias": alias or base_anime_name,
-                                                "thumbnail": thumb_url or None,
-                                                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                                "has_next": next_url is not None,
-                                                "download_path": base_dir,
-                                                "is_manual": False
-                                            }
-                                            
-                                        save_config(self.config)
-                                        self.update_library_list()
-                                    else:
-                                        # Si el archivo existe pero la descarga falló o se detuvo
-                                        if os.path.exists(final_path):
-                                            os.remove(final_path)
-                                        
-                                        # Solo crear el archivo .txt si NO fue una detención manual
-                                        if not self.stop_requested:
-                                            self.log(f"[!] Falló la descarga de: {filename}. Creando marcador .txt", type="error")
-                                            
-                                            # Crear archivo .txt como marcador de fallo
-                                            txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
-                                            txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
-                                            with open(txt_path, "w", encoding="utf-8") as f:
-                                                f.write(f"No se pudo descargar el capítulo {ep_number} de {alias or base_anime_name}.\n")
-                                                f.write(f"URL de origen: {current_url}\n")
-                                                f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                                            
-                                            # Actualizar biblioteca para saltar este capítulo si falló (pero no si se detuvo)
-                                            if base_url in self.config["following"]:
-                                                self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
-                                                save_config(self.config)
-                                                self.update_library_list()
-                                        else:
-                                            self.log(f"[*] Descarga de {filename} cancelada por el usuario.", type="warning")
+                            self.log(f"[+] Descargado: {filename} ({file_size / (1024*1024):.1f} MB)", type="success")
+                            
+                            # Actualizar entrada existente en biblioteca
+                            if base_url in self.config["following"]:
+                                self.config["following"][base_url].update({
+                                    "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
+                                    "last_url": current_url,
+                                    "alias": alias or base_anime_name,
+                                    "thumbnail": thumb_url or self.config["following"][base_url].get("thumbnail"),
+                                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "has_next": next_url is not None,
+                                    "download_path": base_dir,
+                                    "is_manual": False
+                                })
                             else:
-                                self.log(f"[!] No se pudo obtener el enlace directo de MediaFire. Creando marcador .txt", type="error")
-                                alias = self.download_tab_view.alias_input.value.strip()
-                                base_dir = self.download_tab_view.dir_input.value or os.getcwd()
-                                anime_folder = alias or base_anime_name
-                                download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
-                                os.makedirs(download_dir, exist_ok=True)
+                                # Por si acaso no se guardó antes (no debería pasar)
+                                self.config["following"][base_url] = {
+                                    "last_chapter": int(ep_number) if ep_number.isdigit() else 0,
+                                    "last_url": current_url,
+                                    "alias": alias or base_anime_name,
+                                    "thumbnail": thumb_url or None,
+                                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    "has_next": next_url is not None,
+                                    "download_path": base_dir,
+                                    "is_manual": False
+                                }
+                            
+                            save_config(self.config)
+                            self.update_library_list()
+                        else:
+                            # Si el archivo existe pero la descarga falló o se detuvo
+                            if os.path.exists(final_path):
+                                os.remove(final_path)
+                            
+                            # Solo crear el archivo .txt si NO fue una detención manual
+                            if not self.stop_requested:
+                                self.log(f"[!] Falló la descarga de: {filename}. Creando marcador .txt", type="error")
                                 
+                                # Crear archivo .txt como marcador de fallo
                                 txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
                                 txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
                                 with open(txt_path, "w", encoding="utf-8") as f:
-                                    f.write(f"No se pudo obtener el enlace de MediaFire para el capítulo {ep_number} de {alias or base_anime_name}.\n")
+                                    f.write(f"No se pudo descargar el capítulo {ep_number} de {alias or base_anime_name}.\n")
                                     f.write(f"URL de origen: {current_url}\n")
+                                    f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                                 
+                                # Actualizar biblioteca para saltar este capítulo si falló (pero no si se detuvo)
                                 if base_url in self.config["following"]:
                                     self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
                                     save_config(self.config)
                                     self.update_library_list()
-                        else:
-                            self.log(f"[!] No se encontró el servidor MediaFire para este capítulo. Creando marcador .txt", type="warning")
-                            alias = self.download_tab_view.alias_input.value.strip()
-                            base_dir = self.download_tab_view.dir_input.value or os.getcwd()
-                            anime_folder = alias or base_anime_name
-                            download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
-                            os.makedirs(download_dir, exist_ok=True)
-                            
-                            txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
-                            txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
-                            with open(txt_path, "w", encoding="utf-8") as f:
-                                f.write(f"No se encontró el servidor MediaFire para el capítulo {ep_number} de {alias or base_anime_name}.\n")
-                                f.write(f"URL de origen: {current_url}\n")
-                                f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                            
-                            if base_url in self.config["following"]:
-                                self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
-                                save_config(self.config)
-                                self.update_library_list()
-
-                        current_url = next_url
-                        if not current_url:
-                            self.log("[*] No hay más capítulos disponibles.", type="info")
-                    except Exception as e:
-                        self.log(f"Error: {str(e)}", type="error")
-                        break
-                    finally:
-                        await page.close()
-            finally:
-                # Mostrar resumen final
-                if self.chapters_downloaded_count > 0:
-                    end_time = time.time()
-                    total_time = end_time - self.session_start_time
-                    avg_speed = (self.total_downloaded_session / (1024 * 1024)) / total_time if total_time > 0 else 0
+                            else:
+                                self.log(f"[*] Descarga de {filename} cancelada por el usuario.", type="warning")
+                    else:
+                        self.log(f"[!] No se pudo obtener el enlace directo de MediaFire. Creando marcador .txt", type="error")
+                        alias = self.download_tab_view.alias_input.value.strip()
+                        base_dir = self.download_tab_view.dir_input.value or os.getcwd()
+                        anime_folder = alias or base_anime_name
+                        download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
+                        os.makedirs(download_dir, exist_ok=True)
+                        
+                        txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
+                        txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
+                        with open(txt_path, "w", encoding="utf-8") as f:
+                            f.write(f"No se pudo obtener el enlace de MediaFire para el capítulo {ep_number} de {alias or base_anime_name}.\n")
+                            f.write(f"URL de origen: {current_url}\n")
+                        
+                        if base_url in self.config["following"]:
+                            self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
+                            save_config(self.config)
+                            self.update_library_list()
+                else:
+                    self.log(f"[!] No se encontró el servidor MediaFire para este capítulo. Creando marcador .txt", type="warning")
+                    alias = self.download_tab_view.alias_input.value.strip()
+                    base_dir = self.download_tab_view.dir_input.value or os.getcwd()
+                    anime_folder = alias or base_anime_name
+                    download_dir = os.path.join(base_dir, RE_INVALID_CHARS.sub("", anime_folder))
+                    os.makedirs(download_dir, exist_ok=True)
                     
-                    self.log("="*40, type="info")
-                    self.log("       RESUMEN DE DESCARGAS", type="info")
-                    self.log("="*40, type="info")
-                    self.log(f"• Capítulos descargados: {self.chapters_downloaded_count}", type="info")
-                    self.log(f"• Tamaño total: {self.total_downloaded_session / (1024 * 1024):.2f} MB", type="info")
-                    self.log(f"• Tiempo total: {total_time:.1f} segundos", type="info")
-                    self.log(f"• Velocidad media: {avg_speed:.2f} MB/s", type="info")
-                    self.log("="*40, type="info")
+                    txt_filename = f"{alias or base_anime_name} - {ep_number}.txt"
+                    txt_path = os.path.join(download_dir, RE_INVALID_CHARS.sub("", txt_filename))
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(f"No se encontró el servidor MediaFire para el capítulo {ep_number} de {alias or base_anime_name}.\n")
+                        f.write(f"URL de origen: {current_url}\n")
+                        f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    
+                    if base_url in self.config["following"]:
+                        self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
+                        save_config(self.config)
+                        self.update_library_list()
 
-                self.download_tab_view.start_btn.disabled = False
-                self.download_tab_view.stop_btn.disabled = True
-                self.download_tab_view.pause_btn.disabled = True
-                self.download_tab_view.restart_btn.disabled = True
-                self.download_tab_view.status_text.value = "Estado: Finalizado"
-                
-                # Resetear barra de progreso al finalizar
-                self.download_tab_view.progress_bar.value = 0
-                self.download_tab_view.progress_info.value = "0% | 0MB / 0MB | 0.00 MB/s"
-                
-                self.page.update()
+                current_url = next_url
+                if not current_url:
+                    self.log("[*] No hay más capítulos disponibles.", type="info")
+            except Exception as e:
+                self.log(f"Error: {str(e)}", type="error")
+                break
+            finally:
+                await page.close()
+        
+        # Mostrar resumen final
+        if self.chapters_downloaded_count > 0:
+            end_time = time.time()
+            total_time = end_time - self.session_start_time
+            avg_speed = (self.total_downloaded_session / (1024 * 1024)) / total_time if total_time > 0 else 0
+            
+            self.log("="*40, type="info")
+            self.log("       RESUMEN DE DESCARGAS", type="info")
+            self.log("="*40, type="info")
+            self.log(f"• Capítulos descargados: {self.chapters_downloaded_count}", type="info")
+            self.log(f"• Tamaño total: {self.total_downloaded_session / (1024 * 1024):.2f} MB", type="info")
+            self.log(f"• Tiempo total: {total_time:.1f} segundos", type="info")
+            self.log(f"• Velocidad media: {avg_speed:.2f} MB/s", type="info")
+            self.log("="*40, type="info")
+
+        self.download_tab_view.start_btn.disabled = False
+        self.download_tab_view.stop_btn.disabled = True
+        self.download_tab_view.pause_btn.disabled = True
+        self.download_tab_view.restart_btn.disabled = True
+        self.download_tab_view.status_text.value = "Estado: Finalizado"
+        
+        # Resetear barra de progreso al finalizar
+        self.download_tab_view.progress_bar.value = 0
+        self.download_tab_view.progress_info.value = "0% | 0MB / 0MB | 0.00 MB/s"
+        
+        self.page.update()
 
     async def update_progress(self, progress, downloaded, total, speed):
         self.download_tab_view.progress_bar.value = progress
