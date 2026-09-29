@@ -1,6 +1,7 @@
 """
 Módulo del Scraper de Anime.
 Proporciona la lógica para navegar por JkAnime, extraer enlaces de servidores y obtener links directos de MediaFire.
+Optimizado para rendimiento y estabilidad en conexiones.
 """
 import re
 import json
@@ -9,6 +10,8 @@ import os
 
 # Expresiones regulares pre-compiladas
 RE_SERVERS = re.compile(r'var\s+servers\s*=\s*(\[.*?\]);')
+RE_SLUG = re.compile(r'jkanime\.net/([^/]+)/\d+/?')
+RE_SLUG_MAIN = re.compile(r'jkanime\.net/([^/]+)/?$')
 
 class AnimeScraper:
     """
@@ -71,44 +74,84 @@ class AnimeScraper:
     async def get_anime_info(self, page):
         """
         Extrae la URL de la miniatura (poster) del anime.
-        
-        Intenta obtener la imagen desde la página principal del anime, metaetiquetas OG
-        o patrones de URL de activos conocidos en el sitio.
+        Construye la URL directa del CDN a partir del slug del anime (más rápido y fiable).
+        El slug se extrae de la URL de la página actual (ej: /one-piece/1180/ -> one-piece).
         
         Args:
-            page (Page): Objeto Page de Playwright.
+            page (Page): Objeto Page de Playwright (página del capítulo).
             
         Returns:
-            str: URL absoluta de la imagen de portada.
+            str: URL absoluta de la imagen de portada desde CDN.
         """
         try:
-            anime_link_el = await page.query_selector(".breadcrumb a:nth-child(2)")
+            # 1. Extraer slug directamente de la URL actual (más fiable que breadcrumb)
+            # URL típica: https://jkanime.net/one-piece/1180/ -> slug = "one-piece"
+            current_url = page.url
+            slug_match = RE_SLUG.search(current_url)
+            if slug_match:
+                slug = slug_match.group(1)
+                # URL directa del CDN (patrón confirmado en config.json)
+                return f"https://cdn.jkdesa.com/assets/images/animes/image/{slug}.jpg"
             
+            # 2. Fallback: breadcrumb (enlace al anime principal)
+            anime_link_el = await page.query_selector(".breadcrumb a:nth-child(2)")
             if anime_link_el:
                 anime_main_url = await anime_link_el.get_attribute("href")
                 if anime_main_url and "jkanime.net" in anime_main_url:
-                    temp_page = await page.context.new_page()
-                    try:
-                        # Bloqueo de recursos innecesarios
-                        await temp_page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-                        await temp_page.goto(anime_main_url, wait_until="domcontentloaded", timeout=10000)
-                        
-                        img_el = await temp_page.query_selector(".anime_info_img img")
-                        if img_el:
-                            src = await img_el.get_attribute("src")
-                            if src: return src
-                    except Exception: pass
-                    finally: await temp_page.close()
-
+                    slug_match = RE_SLUG_MAIN.search(anime_main_url)
+                    if slug_match:
+                        slug = slug_match.group(1)
+                        return f"https://cdn.jkdesa.com/assets/images/animes/image/{slug}.jpg"
+            
+            # 3. Fallback: og:image en página actual
+            og_image = await page.query_selector("meta[property='og:image']")
+            if og_image:
+                content = await og_image.get_attribute("content")
+                if content and "/assets/images/animes/" in content:
+                    return content
+            
+            # 4. Fallback: buscar imágenes con patrón conocido en página actual
             images = await page.query_selector_all("img")
             for img in images:
                 src = await img.get_attribute("src")
                 if src and "/assets/images/animes/" in src:
                     return src
+        except Exception:
+            pass
+        return "https://jkanime.net/assets/images/no-poster.jpg"
+    
+    async def get_anime_info_from_page(self, page):
+        """
+        Versión ligera: extrae thumbnail SOLO de la página actual (sin navegación extra).
+        Usado para 'Seguir' rápido - intenta extraer slug de la URL, og:image y patrones.
+        
+        Args:
+            page (Page): Objeto Page de Playwright (página del capítulo).
             
+        Returns:
+            str: URL de la imagen o placeholder si no se encuentra.
+        """
+        try:
+            # 1. Extraer slug directamente de la URL actual
+            current_url = page.url
+            slug_match = RE_SLUG.search(current_url)
+            if slug_match:
+                slug = slug_match.group(1)
+                return f"https://cdn.jkdesa.com/assets/images/animes/image/{slug}.jpg"
+            
+            # 2. Fallback: og:image
             og_image = await page.query_selector("meta[property='og:image']")
             if og_image:
-                return await og_image.get_attribute("content")
+                content = await og_image.get_attribute("content")
+                if content and "/assets/images/animes/" in content:
+                    return content
+            
+            # 3. Fallback: patrones en imágenes
+            images = await page.query_selector_all("img")
+            for img in images:
+                src = await img.get_attribute("src")
+                if src and "/assets/images/animes/" in src:
+                    return src
         except Exception:
             pass
         return "https://jkanime.net/assets/images/no-poster.jpg"
@@ -116,6 +159,7 @@ class AnimeScraper:
     async def get_mediafire_direct_link(self, server_url):
         """
         Navega a la página de MediaFire para obtener el enlace directo al archivo de video.
+        Optimizado con timeouts reducidos y bloqueo agresivo de recursos.
         
         Maneja la detección de archivos eliminados o no disponibles y extrae la
         extensión del archivo original.
@@ -129,21 +173,20 @@ class AnimeScraper:
         page = await self.context.new_page()
         try:
             # Bloqueo agresivo de recursos para acelerar la carga
-            await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+            await page.route("**/*", lambda route: route.abort() 
+                if route.request.resource_type in ["image", "font", "media", "stylesheet"] 
+                else route.continue_())
             
-            # Reducido timeout de carga a 7 segundos    
-            await page.goto(server_url, timeout=3000, wait_until="domcontentloaded")
+            # Timeout de navegación reducido a 5 segundos
+            await page.goto(server_url, timeout=5000, wait_until="domcontentloaded")
+            
+            # Verificación rápida de archivo no disponible
             content = await page.content()
-            
-            unavailable_markers = [
-                "The file you attempted to download has been removed",
-                "The file you are looking for is currently unavailable"
-            ]
-            if any(marker in content for marker in unavailable_markers):
+            if "has been removed" in content or "currently unavailable" in content:
                 return None, None
             
-            # Reducido timeout de espera por el botón a 5 segundos
-            d_btn = await page.wait_for_selector("#downloadButton", timeout=3000)
+            # Espera por botón de descarga con timeout reducido
+            d_btn = await page.wait_for_selector("#downloadButton", timeout=4000)
             direct_link = await d_btn.get_attribute('href')
             original_name = await d_btn.get_attribute('aria-label') or "video"
             extension = os.path.splitext(original_name)[1] or ".mp4"

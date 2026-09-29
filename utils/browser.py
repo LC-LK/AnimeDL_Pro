@@ -1,10 +1,51 @@
 """
 Módulo de gestión del navegador.
 Encargado de la inicialización y configuración de Playwright y sus navegadores.
+Optimizado para rendimiento y evasión de detección.
 """
 import os
 import sys
 import subprocess
+
+# Argumentos optimizados para Chromium headless - rendimiento + stealth
+BROWSER_LAUNCH_ARGS = [
+    "--headless=new",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--disable-web-security",
+    "--disable-features=IsolateOrigins,site-per-process",
+    "--disable-site-isolation-trials",
+    "--disable-extensions",
+    "--disable-plugins",
+    "--disable-default-apps",
+    "--disable-sync",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-breakpad",
+    "--disable-client-side-phishing-detection",
+    "--disable-component-extensions-with-background-pages",
+    "--disable-domain-reliability",
+    "--disable-features=TranslateUI",
+    "--disable-hang-monitor",
+    "--disable-ipc-flooding-protection",
+    "--disable-popup-blocking",
+    "--disable-prompt-on-repost",
+    "--disable-renderer-backgrounding",
+    "--disable-search-engine-choice-screen",
+    "--enable-features=NetworkService,NetworkServiceInProcess",
+    "--force-color-profile=srgb",
+    "--metrics-recording-only",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--no-pings",
+    "--password-store=basic",
+    "--use-mock-keychain",
+    "--window-size=1280,720",
+]
 
 def ensure_playwright_browsers():
     """
@@ -51,7 +92,7 @@ def ensure_playwright_browsers():
 
 async def get_browser_instance(p, logger=None):
     """
-    Crea y devuelve una instancia configurada de un navegador headless.
+    Crea y devuelve una instancia configurada de un navegador headless optimizada.
     Permite una instalación automática y silenciosa si los binarios no existen.
     """
     try:
@@ -60,8 +101,8 @@ async def get_browser_instance(p, logger=None):
             user_local_appdata = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(user_local_appdata, "ms-playwright")
             
-        # Intentar lanzamiento normal
-        return await p.chromium.launch(headless=True)
+        # Intentar lanzamiento normal con args optimizados
+        return await p.chromium.launch(headless=True, args=BROWSER_LAUNCH_ARGS)
     except Exception as e:
         # Si falla en el .exe o por falta de binarios, intentamos instalarlos
         if "executable doesn't exist" in str(e).lower() or getattr(sys, 'frozen', False):
@@ -72,7 +113,7 @@ async def get_browser_instance(p, logger=None):
                 
             if ensure_playwright_browsers():
                 try:
-                    return await p.chromium.launch(headless=True)
+                    return await p.chromium.launch(headless=True, args=BROWSER_LAUNCH_ARGS)
                 except Exception as e2:
                     raise Exception(f"Error tras instalación: {str(e2)}")
         

@@ -26,11 +26,29 @@ except AttributeError:
 else:
     ssl._create_default_https_context = _create_unverified_https_context
 
+# Referencia global para cleanup
+_app_instance = None
+
+async def on_window_close(e):
+    """Cleanup al cerrar la ventana."""
+    global _app_instance
+    if _app_instance:
+        # Cerrar browser context
+        await _app_instance.close_browser()
+        # Cerrar sesión aiohttp
+        await _app_instance.downloader.close_session()
+        # Cerrar connector compartido
+        from core.downloader import close_shared_connector
+        await close_shared_connector()
+        _app_instance = None
+
 def main(page: ft.Page):
     """
     Función de arranque.
     """
-    AnimeDownloaderApp(page)
+    global _app_instance
+    _app_instance = AnimeDownloaderApp(page)
+    page.on_window_event = lambda e: asyncio.create_task(on_window_close(e)) if e.data == "close" else None
 
 if __name__ == "__main__":
     # Soporte crítico para PyInstaller y multiprocessing
