@@ -10,7 +10,7 @@ import time
 import random
 from datetime import datetime
 
-from config.manager import load_config, save_config, USER_AGENTS
+from config.manager import load_config, save_config, force_save, USER_AGENTS
 from utils.helpers import lazy_import_network, resource_path
 from utils.browser import get_browser_instance
 
@@ -287,7 +287,8 @@ class AnimeDownloaderApp:
         if e.path:
             self.download_tab_view.dir_input.value = e.path
             self.config["settings"]["default_dir"] = e.path
-            save_config(self.config)
+            # Cambio de config de usuario -> force_save inmediato
+            asyncio.create_task(force_save(self.config))
             self.page.update()
 
     def on_url_change(self, e):
@@ -391,7 +392,7 @@ class AnimeDownloaderApp:
                 if thumbnail and thumbnail != "https://jkanime.net/assets/images/no-poster.jpg":
                     self.config["following"][base_url]["thumbnail"] = thumbnail
 
-            if save_config(self.config):
+            if await force_save(self.config):
                 self.update_library_list()
                 self.download_tab_view.alias_input.value = final_alias
                 self.page.snack_bar = ft.SnackBar(ft.Text(f"Biblioteca actualizada: {final_alias}"))
@@ -424,18 +425,18 @@ class AnimeDownloaderApp:
         return anime_data, matched_base_url
 
     # --- Biblioteca Logic ---
-    def toggle_view_mode(self, e):
+    async def toggle_view_mode(self, e):
         self.view_mode = list(e.control.selected)[0]
         self.config["settings"]["view_mode"] = self.view_mode
         self.library_tab_view.grid_size_slider.visible = self.view_mode == "grid"
-        save_config(self.config)
+        await force_save(self.config)
         self.update_library_list()
 
-    def on_grid_size_change(self, e):
+    async def on_grid_size_change(self, e):
         self.grid_size = e.control.value
         self.library_tab_view.library_grid.max_extent = self.grid_size
         self.config["settings"]["grid_size"] = self.grid_size
-        save_config(self.config)
+        await force_save(self.config)
         self.page.update()
 
     def on_library_search_change(self, e):
@@ -622,7 +623,7 @@ class AnimeDownloaderApp:
         self.delete_dialog.open = False
         self.page.update()
 
-    def delete_selected_animes(self, e):
+    async def delete_selected_animes(self, e):
         count = 0
         for url in list(self.selected_animes):
             if url in self.config.get("following", {}):
@@ -630,7 +631,7 @@ class AnimeDownloaderApp:
                 count += 1
         
         if count > 0:
-            if save_config(self.config):
+            if await force_save(self.config):
                 self.selected_animes.clear()
                 self.update_library_list()
                 self.log(f"[-] Se eliminaron {count} animes.", type="warning")
@@ -731,7 +732,7 @@ class AnimeDownloaderApp:
 
         await asyncio.gather(*[check_anime(url) for url in list(self.selected_animes)])
 
-        save_config(self.config)
+        await force_save(self.config)
         self.library_tab_view.check_updates_btn.disabled = False
         self.library_tab_view.check_updates_btn.text = "Actualizar"
         self.show_updates_dialog(updates_found)
@@ -794,7 +795,7 @@ class AnimeDownloaderApp:
                 finally: await page.close()
 
         await asyncio.gather(*[check_anime(url, data) for url, data in self.config["following"].items()])
-        save_config(self.config)
+        await force_save(self.config)
         
         # Actualizar UI una sola vez con todos los resultados
         if found_updates:
@@ -987,7 +988,7 @@ class AnimeDownloaderApp:
                                     "is_manual": False
                                 }
                             
-                            save_config(self.config)
+                            await force_save(self.config)
                             self.update_library_list()
                         else:
                             # Si el archivo existe pero la descarga falló o se detuvo
@@ -1009,7 +1010,7 @@ class AnimeDownloaderApp:
                                 # Actualizar biblioteca para saltar este capítulo si falló (pero no si se detuvo)
                                 if base_url in self.config["following"]:
                                     self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
-                                    save_config(self.config)
+                                    await force_save(self.config)
                                     self.update_library_list()
                             else:
                                 self.log(f"[*] Descarga de {filename} cancelada por el usuario.", type="warning")
@@ -1029,7 +1030,7 @@ class AnimeDownloaderApp:
                         
                         if base_url in self.config["following"]:
                             self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
-                            save_config(self.config)
+                            await force_save(self.config)
                             self.update_library_list()
                 else:
                     self.log(f"[!] No se encontró el servidor MediaFire para este capítulo. Creando marcador .txt", type="warning")
@@ -1048,7 +1049,7 @@ class AnimeDownloaderApp:
                     
                     if base_url in self.config["following"]:
                         self.config["following"][base_url]["last_chapter"] = int(ep_number) if ep_number.isdigit() else 0
-                        save_config(self.config)
+                        await force_save(self.config)
                         self.update_library_list()
 
                 current_url = next_url

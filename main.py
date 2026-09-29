@@ -33,6 +33,9 @@ async def on_window_close(e):
     """Cleanup al cerrar la ventana."""
     global _app_instance
     if _app_instance:
+        # Guardar config INMEDIATAMENTE (force save)
+        from config.manager import force_save
+        await force_save(_app_instance.config)
         # Cerrar browser context
         await _app_instance.close_browser()
         # Cerrar sesión aiohttp

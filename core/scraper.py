@@ -2,6 +2,7 @@
 Módulo del Scraper de Anime.
 Proporciona la lógica para navegar por JkAnime, extraer enlaces de servidores y obtener links directos de MediaFire.
 Optimizado para rendimiento y estabilidad en conexiones.
+Incluye cache en memoria para requests/responses de sesión (Sprint 2.3).
 """
 import re
 import json
@@ -12,6 +13,67 @@ import os
 RE_SERVERS = re.compile(r'var\s+servers\s*=\s*(\[.*?\]);')
 RE_SLUG = re.compile(r'jkanime\.net/([^/]+)/\d+/?')
 RE_SLUG_MAIN = re.compile(r'jkanime\.net/([^/]+)/?$')
+
+# ============ REQUEST/RESPONSE CACHE (Sprint 2.3) ============
+# Cache en memoria para la sesión actual - evita requests redundantes
+# Clave: URL, Valor: datos cacheados
+_request_cache = {
+    "html": {},      # url -> html content
+    "servers": {},   # url -> dict servers
+    "next_url": {},  # url -> next_url str
+    "mf_direct": {}, # mf_url -> (direct_link, ext)
+}
+
+def get_cached_html(url):
+    """Obtiene HTML cacheado o None."""
+    return _request_cache["html"].get(url)
+
+def set_cached_html(url, html):
+    """Guarda HTML en cache."""
+    _request_cache["html"][url] = html
+
+def get_cached_servers(url):
+    """Obtiene servers cacheados o None."""
+    return _request_cache["servers"].get(url)
+
+def set_cached_servers(url, servers):
+    """Guarda servers en cache."""
+    _request_cache["servers"][url] = servers
+
+def get_cached_next_url(url):
+    """Obtiene next_url cacheado o None."""
+    return _request_cache["next_url"].get(url)
+
+def set_cached_next_url(url, next_url):
+    """Guarda next_url en cache."""
+    _request_cache["next_url"][url] = next_url
+
+def get_cached_mf_direct(mf_url):
+    """Obtiene MediaFire direct link cacheado o None."""
+    return _request_cache["mf_direct"].get(mf_url)
+
+def set_cached_mf_direct(mf_url, direct_link, ext):
+    """Guarda MediaFire direct link en cache."""
+    _request_cache["mf_direct"][mf_url] = (direct_link, ext)
+
+def clear_request_cache():
+    """Limpia todo el cache de requests (para tests o nueva sesión)."""
+    global _request_cache
+    _request_cache = {
+        "html": {},
+        "servers": {},
+        "next_url": {},
+        "mf_direct": {},
+    }
+
+def get_cache_stats():
+    """Retorna estadísticas del cache."""
+    return {
+        "html": len(_request_cache["html"]),
+        "servers": len(_request_cache["servers"]),
+        "next_url": len(_request_cache["next_url"]),
+        "mf_direct": len(_request_cache["mf_direct"]),
+    }
 
 class AnimeScraper:
     """
@@ -32,9 +94,7 @@ class AnimeScraper:
     async def get_server_links(self, page):
         """
         Analiza el contenido de la página para extraer los servidores de video disponibles.
-        
-        Decodifica la variable JavaScript 'servers' presente en el HTML del episodio,
-        la cual contiene enlaces en Base64.
+        Con cache: si ya visitamos esta URL, retorna servers cacheados.
         
         Args:
             page (Page): Objeto Page de Playwright con el capítulo cargado.
@@ -42,9 +102,20 @@ class AnimeScraper:
         Returns:
             dict: Mapeo de nombre del servidor (ej: 'Mediafire') a su URL decodificada.
         """
+        url = page.url
+        # Cache hit
+        cached = get_cached_servers(url)
+        if cached is not None:
+            return cached
+        
         content = await page.content()
+        # Cache HTML también
+        set_cached_html(url, content)
+        
         match = RE_SERVERS.search(content)
-        if not match: return {}
+        if not match: 
+            set_cached_servers(url, {})
+            return {}
         
         links = {}
         try:
@@ -55,12 +126,16 @@ class AnimeScraper:
                 if remote:
                     decoded = base64.b64decode(remote).decode('utf-8')
                     links[name] = decoded
-        except Exception: pass
+        except Exception:
+            pass
+        
+        set_cached_servers(url, links)
         return links
 
     async def get_next_url(self, page):
         """
         Localiza el enlace al siguiente capítulo de la serie.
+        Con cache: si ya visitamos esta URL, retorna next_url cacheado.
         
         Args:
             page (Page): Objeto Page de Playwright.
@@ -68,8 +143,17 @@ class AnimeScraper:
         Returns:
             str: URL del siguiente episodio o None si es el último disponible.
         """
+        url = page.url
+        # Cache hit
+        cached = get_cached_next_url(url)
+        if cached is not None:
+            return cached
+        
         next_btn = await page.query_selector("a:has-text('Siguiente')")
-        return await next_btn.get_attribute('href') if next_btn else None
+        next_url = await next_btn.get_attribute('href') if next_btn else None
+        
+        set_cached_next_url(url, next_url)
+        return next_url
 
     async def get_anime_info(self, page):
         """
@@ -159,10 +243,9 @@ class AnimeScraper:
     async def get_mediafire_direct_link(self, server_url):
         """
         Navega a la página de MediaFire para obtener el enlace directo al archivo de video.
-        Optimizado con timeouts reducidos y bloqueo agresivo de recursos.
+        Con cache: si ya visitamos esta URL de MF, retorna link directo cacheado.
         
-        Maneja la detección de archivos eliminados o no disponibles y extrae la
-        extensión del archivo original.
+        Optimizado con timeouts reducidos y bloqueo agresivo de recursos.
         
         Args:
             server_url (str): URL de la página intermedia de MediaFire.
@@ -170,6 +253,11 @@ class AnimeScraper:
         Returns:
             tuple: (direct_link, extension) o (None, None) en caso de fallo o archivo borrado.
         """
+        # Cache hit
+        cached = get_cached_mf_direct(server_url)
+        if cached is not None:
+            return cached
+        
         page = await self.context.new_page()
         try:
             # Bloqueo agresivo de recursos para acelerar la carga
@@ -183,6 +271,7 @@ class AnimeScraper:
             # Verificación rápida de archivo no disponible
             content = await page.content()
             if "has been removed" in content or "currently unavailable" in content:
+                set_cached_mf_direct(server_url, None, None)
                 return None, None
             
             # Espera por botón de descarga con timeout reducido
@@ -191,8 +280,10 @@ class AnimeScraper:
             original_name = await d_btn.get_attribute('aria-label') or "video"
             extension = os.path.splitext(original_name)[1] or ".mp4"
             
+            set_cached_mf_direct(server_url, direct_link, extension)
             return direct_link, extension
         except Exception:
+            set_cached_mf_direct(server_url, None, None)
             return None, None
         finally:
             await page.close()

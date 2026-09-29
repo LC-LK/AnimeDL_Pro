@@ -6,6 +6,14 @@ import os
 import sys
 import json
 import re
+import asyncio
+from threading import Lock
+
+# Estado para debounce de guardado
+_save_buffer = None
+_save_task = None
+_save_lock = Lock()
+_debounce_delay = 0.5  # 500ms
 
 def get_config_path():
     """
@@ -30,6 +38,10 @@ def get_config_path():
     return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "config.json")
 
 CONFIG_FILE = get_config_path()
+
+def _get_config_file():
+    """Retorna la ruta del archivo de config (para tests y runtime)."""
+    return CONFIG_FILE
 
 # Lista de User-Agents modernos y diversos para rotar en peticiones HTTP/Playwright
 # Incluye Chrome 126+, Firefox 128+, Edge 126+, Safari 17+ en Windows/macOS/Linux
@@ -79,9 +91,9 @@ def load_config():
         }
     }
     
-    if os.path.exists(CONFIG_FILE):
+    if os.path.exists(_get_config_file()):
         try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            with open(_get_config_file(), "r", encoding="utf-8") as f:
                 data = json.load(f)
                 # Migración simple si es necesario
                 if "history" in data and "following" not in data:
@@ -101,19 +113,104 @@ def load_config():
             return default_config
     return default_config
 
-def save_config(config):
-    """
-    Guarda el estado actual de la configuración en el archivo JSON.
-    
-    Args:
-        config (dict): El diccionario de configuración completo que se desea persistir.
-        
-    Returns:
-        bool: True si el guardado fue exitoso, False en caso contrario.
-    """
+async def _save_immediate(config):
+    """Escritura inmediata a disco (sin debounce). Usar para cleanup/export."""
     try:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        with open(_get_config_file(), "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4, ensure_ascii=False)
         return True
-    except Exception:
+    except Exception as e:
+        print(f"Error guardando config.json: {e}")
+        return False
+
+def _schedule_debounced_save(config, loop):
+    """Programa escritura debounced (500ms). Seguro para hilos."""
+    global _save_buffer, _save_task
+    with _save_lock:
+        _save_buffer = config
+        if _save_task and not _save_task.done():
+            _save_task.cancel()
+        async def _debounced_write():
+            try:
+                await asyncio.sleep(_debounce_delay)
+                with _save_lock:
+                    if _save_buffer is not None:
+                        await _save_immediate(_save_buffer)
+                        _save_buffer = None
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                print(f"Error en debounced save: {e}")
+        _save_task = asyncio.create_task(_debounced_write())
+
+def save_config(config):
+    """
+    Guarda la configuración con debounce (500ms).
+    Para guardado inmediato, usar force_save().
+    
+    Args:
+        config (dict): Diccionario de configuración a persistir.
+        
+    Returns:
+        bool: True si se programó correctamente (la escritura real es asíncrona).
+    """
+    try:
+        # Intentar obtener loop actual; si no hay, crear tarea en loop nuevo
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No hay loop corriendo (ej. llamado desde hilo sync)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        _schedule_debounced_save(config, loop)
+        return True
+    except Exception as e:
+        print(f"Error programando save_config: {e}")
+        return False
+
+async def force_save(config):
+    """
+    Guarda la configuración INMEDIATAMENTE (sin debounce).
+    Usar en: cierre de app, export, cambios críticos.
+    
+    Args:
+        config (dict): Diccionario de configuración a persistir.
+        
+    Returns:
+        bool: True si el guardado fue exitoso.
+    """
+    global _save_buffer, _save_task
+    with _save_lock:
+        # Cancelar cualquier write pendiente
+        if _save_task and not _save_task.done():
+            _save_task.cancel()
+        _save_buffer = None
+    return await _save_immediate(config)
+
+
+def _get_config_file():
+    """Retorna la ruta del archivo de config (para tests)."""
+    return CONFIG_FILE
+
+
+def reset_config_manager():
+    """Resetea el estado del debounce (para tests)."""
+    global _save_buffer, _save_task
+    with _save_lock:
+        _save_buffer = None
+        if _save_task and not _save_task.done():
+            _save_task.cancel()
+
+
+def save_config_sync(config):
+    """
+    Guarda la configuración de forma SÍNCRONA (para tests/legacy).
+    No usa debounce.
+    """
+    try:
+        with open(_get_config_file(), "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Error guardando config.json (sync): {e}")
         return False
