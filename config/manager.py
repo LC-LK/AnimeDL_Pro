@@ -39,6 +39,21 @@ def get_config_path():
 
 CONFIG_FILE = get_config_path()
 
+def get_browser_profile_dir():
+    """Directorio del perfil persistente de Chromium.
+
+    Persistir el perfil conserva la cookie `cf_clearance` de Cloudflare entre
+    ejecuciones, de modo que el challenge se resuelve una vez y luego se reutiliza
+    en vez de repetirse en cada arranque.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    profile_dir = os.path.join(base, "AnimeDL_Pro", "browser_profile")
+    try:
+        os.makedirs(profile_dir, exist_ok=True)
+    except OSError:
+        pass
+    return profile_dir
+
 def _get_config_file():
     """Retorna la ruta del archivo de config (para tests y runtime)."""
     return CONFIG_FILE

@@ -10,9 +10,9 @@ import time
 import random
 from datetime import datetime
 
-from config.manager import load_config, save_config, force_save, USER_AGENTS
+from config.manager import load_config, save_config, force_save, get_browser_profile_dir
 from utils.helpers import lazy_import_network, resource_path
-from utils.browser import get_browser_instance
+from utils.browser import get_persistent_context
 
 from .styles import BG_COLOR, SURFACE_COLOR, ACCENT_COLOR, WINDOW_WIDTH, WINDOW_HEIGHT, WINDOW_TITLE, CHECKBOX_FILL_COLOR, TEXT_PRIMARY, TEXT_SECONDARY, APP_VERSION
 from .components.activity_log import ActivityLog
@@ -124,19 +124,65 @@ class AnimeDownloaderApp:
             self._downloader = Downloader(self)
         return self._downloader
 
+    @staticmethod
+    def _route_handler(route):
+        """Bloquea solo recursos pesados.
+
+        NO se bloquean stylesheets ni scripts: el interstitial de Cloudflare
+        (Turnstile) los necesita para resolver el challenge. Bloquearlos rompe el
+        bypass y provoca interstitials perpetuos.
+        """
+        try:
+            if route.request.resource_type in ("media", "font"):
+                return route.abort()
+        except Exception:
+            pass
+        return route.continue_()
+
+    async def _warm_up(self):
+        """Visita la home de JkAnime para obtener/renovar la cookie `cf_clearance`.
+
+        Al usar un perfil persistente, este warm-up solo hace trabajo real la
+        primera vez o cuando la cookie expira; después el challenge no reaparece.
+        """
+        try:
+            page = await self._context.new_page()
+            try:
+                await page.goto("https://jkanime.net/", wait_until="domcontentloaded", timeout=25000)
+                from core.scraper import _is_cf_challenge, _wait_for_cf_challenge
+                if _is_cf_challenge(await page.content()):
+                    self.log("[*] Resolviendo Cloudflare (warm-up)...", type="info")
+                    await _wait_for_cf_challenge(page, max_wait=45)
+            finally:
+                await page.close()
+        except Exception as e:
+            self.log(f"[!] Warm-up de Cloudflare falló: {str(e)[:90]}", type="warning")
+
+    async def _handle_cf(self, page, max_wait: int = 30):
+        """Espera un Cloudflare Challenge si la página actual lo muestra."""
+        try:
+            from core.scraper import _is_cf_challenge, _wait_for_cf_challenge
+            if _is_cf_challenge(await page.content()):
+                await _wait_for_cf_challenge(page, max_wait=max_wait)
+        except Exception:
+            pass
+
     async def get_browser_context(self):
-        """Obtiene o crea un contexto de navegador reutilizable (singleton)."""
+        """Obtiene o crea un contexto de navegador reutilizable (singleton).
+
+        Usa un contexto PERSISTENTE para conservar la cookie `cf_clearance` de
+        Cloudflare entre ejecuciones, con stealth aplicado desde `browser.py`.
+        """
         if self._context is None:
             async_playwright, _ = lazy_import_network()
             self._playwright = await async_playwright().start()
-            self._browser = await get_browser_instance(self._playwright, logger=self.log)
-            self._context = await self._browser.new_context(
-                user_agent=random.choice(USER_AGENTS),
-                viewport={'width': 1280, 'height': 720}
+            self._context, self._browser = await get_persistent_context(
+                self._playwright, get_browser_profile_dir(), logger=self.log
             )
-            # Bloquear recursos innecesarios globalmente para acelerar navegación
-            await self._context.route("**/*",
-                lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
+            # Bloqueo global de recursos pesados (sin romper el challenge de CF)
+            await self._context.route("**/*", self._route_handler)
+            # Warm-up: obtiene/renueva cf_clearance antes de navegar a capítulos
+            await self._warm_up()
         return self._context
 
     async def close_browser(self):
@@ -305,8 +351,9 @@ class AnimeDownloaderApp:
     async def _get_anime_metadata(self, url, scraper, page):
         """Helper centralizado para obtener miniatura y nombre limpio del anime."""
         try:
-            # Reducido timeout de 15s a 10s para una respuesta más ágil
-            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            # Timeout amplio (20s) + espera de Cloudflare si aparece el interstitial
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await self._handle_cf(page)
             thumbnail = await scraper.get_anime_info(page)
             title = await page.title()
             
@@ -346,11 +393,10 @@ class AnimeDownloaderApp:
             context = await self.get_browser_context()
             scraper = AnimeScraper(context)
             page = await context.new_page()
-            # Permitir imágenes para poder extraer thumbnail
-            await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["font", "media", "stylesheet"] else route.continue_())
             
             # 1. Navegar a página del capítulo para obtener metadata (título, episodio)
-            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await self._handle_cf(page)
             
             title = await page.title()
             clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
@@ -699,8 +745,9 @@ class AnimeDownloaderApp:
         context = await self.get_browser_context()
         scraper = AnimeScraper(context)
         
-        # Aumentar concurrencia a 15 para checks ligeros
-        semaphore = asyncio.Semaphore(15)
+        # Concurrencia moderada (3): ráfagas de navegaciones simultáneas disparan
+        # el interstitial de Cloudflare. El jitter evita picos sincronizados.
+        semaphore = asyncio.Semaphore(3)
         updates_found = []
         
         async def check_anime(base_url):
@@ -709,17 +756,16 @@ class AnimeDownloaderApp:
                 if not data or data.get("is_manual", False): 
                     return
                 
+                await asyncio.sleep(random.uniform(0, 0.5))
                 page = await context.new_page()
-                # Bloqueo agresivo: solo HTML y scripts necesarios
-                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
                 try:
                     last_url = data.get("last_url")
                     if not last_url: return
                     
-                    # Timeout reducido a 7s para checks rápidos
-                    await page.goto(last_url, wait_until="domcontentloaded", timeout=7000)
+                    # Timeout amplio (20s): debe cubrir la resolución del challenge
+                    await page.goto(last_url, wait_until="domcontentloaded", timeout=20000)
                     
-                    # SOLO obtener next_url (sin metadata pesada ni thumbnail)
+                    # SOLO obtener next_url (ya maneja Cloudflare internamente)
                     next_url = await scraper.get_next_url(page)
                     
                     self.config["following"][base_url]["has_next"] = next_url is not None
@@ -769,7 +815,8 @@ class AnimeDownloaderApp:
         
         context = await self.get_browser_context()
         scraper = AnimeScraper(context)
-        semaphore = asyncio.Semaphore(15)
+        # Concurrencia moderada (3) + jitter para no disparar Cloudflare
+        semaphore = asyncio.Semaphore(3)
         
         # Recolectar resultados en lista local para evitar race conditions en UI
         found_updates = []
@@ -780,10 +827,10 @@ class AnimeDownloaderApp:
             async with semaphore:
                 last_url = data.get("last_url")
                 if not last_url: return
+                await asyncio.sleep(random.uniform(0, 0.5))
                 page = await context.new_page()
-                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
                 try:
-                    await page.goto(last_url, wait_until="domcontentloaded", timeout=7000)
+                    await page.goto(last_url, wait_until="domcontentloaded", timeout=20000)
                     next_url = await scraper.get_next_url(page)
                     self.config["following"][base_url]["has_next"] = next_url is not None
                     if next_url:
@@ -869,8 +916,8 @@ class AnimeDownloaderApp:
                 context = await self.get_browser_context()
                 scraper = AnimeScraper(context)
                 page = await context.new_page()
-                await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "media", "stylesheet"] else route.continue_())
-                await page.goto(url, wait_until="domcontentloaded", timeout=8000)
+                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
+                await self._handle_cf(page)
                 title = await page.title()
                 clean_name = RE_CLEAN_TITLE.sub('', title).replace("— JkAnime", "").strip()
                 base_anime_name = RE_BASE_NAME.sub('', clean_name).strip() or clean_name
